@@ -44,7 +44,8 @@ test('health exposes readiness and model names without credentials', async () =>
   const text = await response.text(), health = JSON.parse(text);
   assert.equal(health.ok, true);
   assert.equal(health.configured, true);
-  assert.ok(health.models.includes('deepseek-flash'));
+  assert.deepEqual(health.models, ['deepseek-flash']);
+  assert.equal(health.model, 'deepseek-flash');
   assert.equal(text.includes('test-local-placeholder'), false);
   assert.equal('apiKey' in health, false);
 });
@@ -55,6 +56,15 @@ test('unsupported models are rejected before creating an inference job', async (
   const result = await response.json();
   assert.match(result.error, /模型不在允许列表/);
   assert.equal(result.id, undefined);
+});
+
+test('Pro requests are rejected before document preparation or Pi execution', async () => {
+  const response = await fetch(`${baseUrl}/api/jobs`, { method: 'POST', body: malformedPdfForm('deepseek-v4-pro') });
+  assert.equal(response.status, 400);
+  const result = await response.json();
+  assert.match(result.error, /模型不在允许列表/);
+  assert.equal(result.id, undefined);
+  assert.equal(result.error.includes('PDF'), false);
 });
 
 test('invalid PDF signatures fail before Poppler or Pi can run', async () => {

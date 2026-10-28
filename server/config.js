@@ -5,11 +5,15 @@ import dotenv from 'dotenv';
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 dotenv.config({ path: path.join(ROOT, '.env'), quiet: true });
 export const RUNTIME = path.join(ROOT, 'runtime');
-export const MODELS = ['deepseek-flash', 'deepseek-v4-pro'];
+// DeepSeek's official API ID currently maps to V4.1-Flash-1017.
+export const MODEL_ID = 'deepseek-flash';
+export const MODEL_NAME = 'DeepSeek V4.1 Flash';
+export const MODEL_VERSION = 'DeepSeek-V4.1-Flash-1017';
+export const MODELS = [MODEL_ID];
 export const config = {
   host: process.env.HOST || '127.0.0.1',
   port: Number(process.env.PORT || 3000),
-  model: process.env.DEEPSEEK_MODEL || MODELS[0],
+  model: MODEL_ID,
   baseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
   apiKey: process.env.DEEPSEEK_API_KEY || '',
   timeout: Number(process.env.PI_TIMEOUT_MS || 600000),

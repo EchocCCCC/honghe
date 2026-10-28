@@ -4,7 +4,7 @@
   const $ = (id) => document.getElementById(id);
   const state = { files: [], busy: false, configured: false, jobId: null, result: null, filter: "all", startedAt: 0, timer: null, pollTimer: null, pollErrors: 0 };
   const stages = ["queued", "extracting", "running", "validating"];
-  const modelNames = { "deepseek-flash": "DeepSeek Flash", "deepseek-v4-pro": "DeepSeek V4 Pro" };
+  const MODEL = "deepseek-flash";
 
   function element(tag, className, text) {
     const el = document.createElement(tag);
@@ -24,7 +24,6 @@
   function readableSize(bytes) { return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`; }
   function updateStart() {
     $("start-button").disabled = state.busy || !state.configured || state.files.length === 0;
-    $("model-select").disabled = state.busy;
     $("file-input").disabled = state.busy;
     $("dropzone").classList.toggle("disabled", state.busy);
     $("clear-files").hidden = state.files.length === 0 || state.busy;
@@ -59,30 +58,12 @@
       $("connection-dot").className = `status-dot ${state.configured ? "connected" : "error"}`;
       $("connection-text").textContent = state.configured ? "服务已就绪" : data.ok ? "请配置模型 API 密钥" : "服务尚未就绪";
       $("connection-text").title = data.piVersion ? `Pi ${data.piVersion}` : "";
-      if (Array.isArray(data.models) && data.models.length) {
-        const selected = $("model-select").value;
-        $("model-select").replaceChildren();
-        for (const model of data.models) {
-          const id = typeof model === "string" ? model : string(model.id || model.name);
-          if (!id) continue;
-          const option = element("option", "", modelNames[id] || id);
-          option.value = id;
-          $("model-select").append(option);
-        }
-        if ([...$("model-select").options].some((option) => option.value === selected)) $("model-select").value = selected;
-        else if (data.model) $("model-select").value = data.model;
-        updateModelHint();
-      }
     } catch (error) {
       state.configured = false;
       $("connection-dot").className = "status-dot error";
       $("connection-text").textContent = "服务未连接";
       $("connection-text").title = error.message;
     } finally { $("refresh-health").disabled = false; updateStart(); }
-  }
-
-  function updateModelHint() {
-    $("model-hint").textContent = $("model-select").value.includes("pro") ? "当前仅分析文字；图纸和扫描区域需人工复核。" : "支持文字与图像，推荐用于图纸和扫描件。";
   }
 
   function renderFiles() {
@@ -203,7 +184,7 @@
     state.timer = setInterval(elapsed, 1000);
     const form = new FormData();
     state.files.forEach((file) => form.append("files", file));
-    form.append("model", $("model-select").value);
+    form.append("model", MODEL);
     try {
       const job = await fetchJson("/api/jobs", { method: "POST", body: form }, 120000);
       if (!job.id) throw new Error("后端未返回任务编号，请检查服务日志。");
@@ -255,6 +236,49 @@
     warnings.forEach((warning) => $("warnings-list").append(element("li", "", string(warning))));
     $("warnings-list").hidden = true;
     $("warnings-toggle").setAttribute("aria-expanded", "false");
+  }
+
+  function renderCoverage() {
+    const coverage = state.result.sourceCoverage || state.result.quality?.sourceCoverage;
+    const available = coverage && typeof coverage === "object" && !Array.isArray(coverage);
+    $("coverage-panel").hidden = !available;
+    if (!available) return;
+    const count = (key) => {
+      const value = coverage[key];
+      if (value === undefined || value === null || value === "") return null;
+      const number = Number(value);
+      return Number.isFinite(number) && number >= 0 ? Math.floor(number) : null;
+    };
+    const totalPages = count("totalPages");
+    const visualPages = count("visualPages");
+    const failedPages = count("failedVisualPages");
+    const reviewed = count("reviewedRequirementCount");
+    const totalRequirements = count("totalRequirements");
+    const metrics = [
+      ["资料物理页数", totalPages, "页"],
+      ["已提交图像", visualPages, "页"],
+      ["图像覆盖缺口", failedPages, "页"],
+      ["提取批次", count("extractionBatches"), "批"],
+      ["模型复核批次", count("reviewBatches"), "批"],
+      ["已提交复核要求", reviewed !== null && totalRequirements !== null ? `${reviewed} / ${totalRequirements}` : reviewed, "条"],
+    ];
+    $("coverage-stats").replaceChildren();
+    for (const [label, value, unit] of metrics) {
+      const stat = element("div", "coverage-stat");
+      const number = element("strong", "", value === null ? "未提供" : value);
+      if (value !== null) number.append(element("span", "", unit));
+      stat.append(element("span", "coverage-stat-label", label), number);
+      $("coverage-stats").append(stat);
+    }
+    $("coverage-summary").textContent = totalPages !== null ? `共 ${totalPages} 页${reviewed !== null ? ` · 提交复核 ${reviewed} 条` : ""}` : "查看分析与复核记录";
+    const notices = [];
+    if (Array.isArray(coverage.numericReviewFindings) && coverage.numericReviewFindings.length) notices.push(`${coverage.numericReviewFindings.length} 页存在疑似未覆盖的图纸数值，详见提取提示；这不是自动判错。`);
+    if (failedPages > 0) notices.push(`${failedPages} 页图像未完整提交，相关图形、标注或扫描内容可能遗漏，请核对原始 PDF。`);
+    if (reviewed !== null && totalRequirements !== null && reviewed < totalRequirements) notices.push(`${totalRequirements - reviewed} 条要求未再次单独提交复核（可能为查漏新增项），请重点核对。`);
+    $("coverage-warning").textContent = notices.join(" ");
+    $("coverage-warning").hidden = !notices.length;
+    $("coverage-panel").open = notices.length > 0;
+    $("coverage-panel").classList.toggle("has-warning", notices.length > 0);
   }
 
   function sourceDocumentIndex(file) {
@@ -362,6 +386,7 @@
     $("result-content").hidden = false;
     $("export-actions").hidden = false;
     renderSummary();
+    renderCoverage();
     renderWarnings();
     $("category-filter").replaceChildren();
     const all = element("option", "", "全部类别");
@@ -452,7 +477,6 @@
   window.addEventListener("drop", (event) => event.preventDefault());
   $("clear-files").addEventListener("click", () => { if (!state.busy) { state.files = []; renderFiles(); clearAlert(); } });
   $("start-button").addEventListener("click", startJob);
-  $("model-select").addEventListener("change", updateModelHint);
   $("refresh-health").addEventListener("click", checkHealth);
   $("dismiss-alert").addEventListener("click", clearAlert);
   $("category-filter").addEventListener("change", renderList);

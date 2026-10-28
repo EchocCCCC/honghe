@@ -4,18 +4,18 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { createHash } from 'node:crypto';
-import { ROOT, config } from './config.js';
+import { ROOT, config, MODEL_ID, MODEL_NAME, MODEL_VERSION } from './config.js';
 
 export const PI_CLI = fileURLToPath(new URL('./bundle/cli.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
 export const SKILL = path.join(ROOT, 'skills/manufacturing-requirements-extractor');
 
 export async function writePiConfig(directory) {
   await fs.mkdir(directory, { recursive: true });
-  const models = ['deepseek-flash', 'deepseek-v4-pro'].map(id => ({
-    id, name: id, reasoning: true, input: id === 'deepseek-flash' ? ['text', 'image'] : ['text'], contextWindow: 1000000, maxTokens: Number(process.env.PI_MAX_TOKENS || 98304),
+  const models = [{
+    id: MODEL_ID, name: MODEL_NAME, reasoning: true, input: ['text', 'image'], contextWindow: 1000000, maxTokens: Number(process.env.PI_MAX_TOKENS || 98304),
     thinkingLevelMap: { minimal: 'low', low: 'low', medium: 'high', high: 'high', xhigh: 'high', max: 'max' },
     samplingParams: { response_format: { type: 'json_object' } },
-  }));
+  }];
   await fs.writeFile(path.join(directory, 'models.json'), JSON.stringify({ providers: { 'deepseek-extract': {
     baseUrl: config.baseUrl, api: 'openai-completions', apiKey: '$DEEPSEEK_API_KEY',
     compat: { supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: true, maxTokensField: 'max_tokens', thinkingFormat: 'deepseek' }, models,
@@ -62,7 +62,8 @@ export function createJsonlDecoder(onEvent) {
 
 export async function runPi({ directory, sourcePath, images = [], model = config.model, skill = SKILL, prompt, onProgress = () => {} }) {
   if (!config.apiKey) throw new Error('请先在本地 .env 配置 DEEPSEEK_API_KEY 并重启服务');
-  if (model === 'deepseek-v4-pro' && images.length) throw new Error('deepseek-v4-pro 不支持当前图纸图像输入；请选择 deepseek-flash 后重试');
+  if (model !== MODEL_ID) throw new Error(`本项目全部阶段固定使用 ${MODEL_NAME}（${MODEL_ID}）`);
+  if (images.length > 12) throw new Error('单次Pi调用图片超过12张，请通过逐页分批管线运行');
   const agentDir = path.join(directory, 'pi-config');
   await writePiConfig(agentDir);
   const args = [PI_CLI, '-p', '--mode', 'json', '--provider', 'deepseek-extract', '--model', model,
@@ -122,7 +123,7 @@ export async function runPi({ directory, sourcePath, images = [], model = config
           await fs.writeFile(path.join(directory, 'incomplete-output.txt'), partial);
         }
         const parsed = parseAssistantEvents(events);
-        const metadata = { model, elapsedMs: Date.now() - started, protocolEvents: lines, usage: parsed.usage, stopReason: parsed.stopReason, piVersion: '1.4.0', skill: skill ? path.basename(skill) : null, skillSha256: skillHash, attachedImages: images.length };
+        const metadata = { model, modelLabel: MODEL_NAME, documentedModelVersion: MODEL_VERSION, versionNote: '版本依据2026-10-28官方映射；API别名并非不可变快照', providerReportedModel: parsed.model, elapsedMs: Date.now() - started, protocolEvents: lines, usage: parsed.usage, stopReason: parsed.stopReason, piVersion: '1.4.0', skill: skill ? path.basename(skill) : null, skillSha256: skillHash, attachedImages: images.length };
         await fs.writeFile(path.join(directory, 'model-result.json'), JSON.stringify(parsed.result, null, 2));
         await fs.writeFile(path.join(directory, 'run-metadata.json'), JSON.stringify(metadata, null, 2));
         resolve({ ...parsed, metadata });

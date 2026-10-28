@@ -1,8 +1,10 @@
 # 鸿禾 · 工艺要求提取工作台
 
-上传 PDF → 后端抽取分页文本/渲染图纸及局部放大 → **启动真实 Pi CLI `-p --mode json`** → 加载本项目 skill → 调用 DeepSeek → 独立核对图纸候选结果 → 校验结构和引文 → 网页筛选、定位原文与导出。
+上传 PDF → 逐物理页提取文字并渲染图像 → 每批最多12张图分批 **启动真实 Pi CLI `-p --mode json`** → DeepSeek 4.1 Flash提取 → 对全部负责页逐页查漏及修正 → 校验结构和引文 → 网页筛选、定位原文与导出。
 
 项目不把 API 直连伪装成 Pi，也不把预先整理的参考答案作为网页提取结果。`evaluation/gold.json` 仅用于离线评估，不进入运行提示。
+
+所有模型阶段固定使用 **DeepSeek 4.1 Flash**。官方API标识为 `deepseek-flash`，2026-10-28文档对应 `DeepSeek-V4.1-Flash-1017`；没有Pro入口或其他模型回退。供应商API别名可能升级，它不是不可变版本锁。PDF解码/渲染仍由Poppler等确定性工具执行，运行时不调用GPT。
 
 ## 本地启动
 
@@ -30,14 +32,22 @@ docker compose up --build
 
 ## 使用
 
-1. 添加采购技术条件及对应工程图 PDF，每次最多10个，每个默认25MB、100页。
-2. 选择模型并点击“开始提取”。默认 `deepseek-flash` 支持图文，适合工程图和扫描页。`deepseek-v4-pro` 在本实现中明确按纯文本模式运行，图纸和扫描内容会提示复核。
+1. 添加采购技术条件及对应工程图 PDF，每次最多10个，每个默认25MB、100页，合计最多200个物理页。
+2. 点击“开始提取”，全部提取和核对固定使用 `deepseek-flash`（4.1 Flash）图文模式。
 3. 完成后按分类、关键字、待复核筛选；展开证据查看文件、物理页码与原文，并可打开对应 PDF。
 4. 导出 JSON 保留所有字段；CSV 用于清单复核。结果是要求提取，不是批准投产的工艺卡。
 
 复杂资料需要几分钟。默认一个任务运行、最多五个排队，每次Pi调用超时为10分钟，可用 `PI_TIMEOUT_MS` 调整。失败任务明确返回错误，不用空表或示例结果表示成功。刷新浏览器可恢复最近一个任务，`?job=任务ID` 可直接打开任务，服务重启前未完成的任务需重新提交。
 
-Flash 对工程图默认进行第二遍独立核对：用同一原始资料和图像，只给图纸与检验频次候选条目，要求输出有证据的替换补丁。补丁只能替换已有候选ID，不能新增或删除条目；再次通过相同结构和来源校验。复核器看的是子集，因此它的自由文本全局提示不会自动合并进最终warnings，避免把“本轮未提供”误报成“全量遗漏”；不确定性通过具体条目的review_note呈现，原始复核输出仍留存。该步骤仍通过 `pi -p` 调用，会增加时间和API用量；`PI_AUTO_REVIEW=0` 可关闭。校对失败时任务明确失败，原始中间结果留在任务目录，不把未完成校对的结果当作完成。
+文字层不能证明页面没有图形内容，因此每个物理页都渲染，不再仅选横向页或有表标题的页。横向工程图额外提供四个局部放大图，末尾空白物理页也保留。图像按页打包分批，单次最多12张、8个物理页，整页与其局部图不会拆散；达到单批上限会新建批次，不丢弃后续页面。
+
+第二阶段对每个批次的负责页逐条查漏，读取完整当前结果作为上下文：既可修正已有条目，也可用本批原文证据补回完全漏掉的独立要求。新增条目必须有真实文件/物理页来源，不能用外部标准或常识补工艺。语句相同但范围/材料状态/参数不同的要求不会被去重；仅完全等价的技术事实合并。新增条目和不确定标注仍需人工确认。
+
+查漏阶段只处理负责页，不能推断其他页遗漏；自由文本提示不会自动覆盖第一次提取的全局warnings。该阶段同样通过 `pi -p` 调用Flash，会增加API用量；`PI_AUTO_REVIEW=0` 可关闭并明确显示复核未执行。失败任务不展示为完整成功。
+
+网页“原文覆盖与复核范围”显示物理页、已提交图像页、失败页和提取/核对批次。覆盖数字证明已提交到模型，**不证明识读正确、语义完整或与GPT完全一致**。
+
+程序另对横向图纸做独立小数检查：比较文字层的小数与同页要求/参数，排除原文引文和字母数字型号，提示疑似未覆盖值；不自动编造其工程含义。同一个值出现在别的特征里也可能造成假覆盖，所以这个检查只能提示复核。
 
 ## Skill 与后端调用
 
@@ -57,16 +67,17 @@ pi -p --mode json --provider deepseek-extract --model deepseek-flash
 
 `--system-prompt` 确保完整 skill 确实进入模型上下文：Pi 会把 `@文件` 文本放在消息最前面，单靠消息末尾 `/skill:` 快捷命令可能不展开。后端同时关闭文档内容可利用的命令执行、文件读取、MCP及自动扩展。子进程的标准输入会立即关闭，以避免 print 模式等待输入。
 
-每个任务有隔离的 `runtime/jobs/<UUID>/pi-config/models.json`，`apiKey` 使用 `$DEEPSEEK_API_KEY` 环境插值；源密钥只在服务端。stdout 按 UTF-8 + LF 严格解析 JSONL，检查最终 assistant 正常结束、完整 JSON、字段结构和引用位置，不用正则“修补”缺失的模型数据。
+每个任务的 `extraction/Bxx/pi-config` 和 `coverage-review/Bxx/pi-config` 都隔离配置；`apiKey` 使用 `$DEEPSEEK_API_KEY` 环境插值，源密钥只在服务端。每次调用留存skill快照/哈希、模型标识和用量。stdout按UTF-8＋LF严格解析JSONL，检查正常结束、完整JSON、字段结构及来源，不用正则修补缺失数据。
 
 ## 真集和真实评估
 
-- `evaluation/gold.json`：两份资料的148项 GPT复核参考要求，含物理页码、适用性、关键项与源文件SHA256。
+- `evaluation/gold.json`：历史148项GPT参考要求；参考集也可能有判读错误，不能当成未经核实的绝对真值。
 - `evaluation/GOLD_NOTES.md`：复核范围、原文歧义和评分边界。该参考集尚未经铸造工程师签认。
 - `evaluation/REPORT.md`：实际运行的版本、结果、问题和修正。
 - `evaluation/skills/`：保留参与对比的 skill 版本；最终版本在 `skills/`。
+- `evaluation/comparison-20261028/`：本轮GPT先独立读原始PDF、冻结事实，再对比旧栈和全Flash逐页输出；原图证据、参考纠错及逐项差异仅随本地包提供。
 
-原始资料、真集、逐条审查和实际提取样例随本地完整交付包提供；公开Git仓库只保存通用代码、skill及评估工具，不上传客户文件或其详细技术清单。
+参考集、逐条审查和实际提取样例随本地完整交付包提供，原PDF由使用者保留；公开Git仓库只保存通用代码、skill及评估工具，不上传客户文件或其详细技术清单。
 
 把原PDF分别复制到 `evaluation/fixtures/specification.pdf` 和 `drawing.pdf`，然后：
 
@@ -84,4 +95,4 @@ pnpm test
 
 本项目需要操作系统子进程及 Poppler，因此面向本机、虚拟机或 Docker 服务器。对外多人部署时请在反向代理中配置登录、HTTPS和访问权限，再将服务置于其后。
 
-官方依赖依据：[Pi仓库](https://github.com/earendil-works/pi)、[Pi CLI](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/cli.md)、[模型配置](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models-configuration.md)、[DeepSeek API](https://api-docs.deepseek.com/)。
+官方依赖依据：[Pi仓库](https://github.com/earendil-works/pi)、[Pi CLI](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/cli.md)、[模型配置](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models-configuration.md)、[DeepSeek模型映射](https://api-docs.deepseek.com/quick_start/pricing/)。

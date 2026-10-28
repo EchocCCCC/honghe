@@ -57,7 +57,7 @@ test('a text match on a drawing page still requires review when no image was sup
   const checked = validateResult(input(), files);
   assert.equal(checked.requirements[0].sources[0].verification, 'text_match');
   assert.equal(checked.requirements[0].review_required, true);
-  assert.match(checked.requirements[0].review_note, /纯文本模式/);
+  assert.match(checked.requirements[0].review_note, /视觉覆盖/);
   assert.equal(checked.quality.textMatchedSources, 1);
   assert.equal(checked.quality.reviewRequired, 1);
 });

@@ -3,11 +3,9 @@ import multer from 'multer';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { ROOT, RUNTIME, MODELS, config, safeError } from './config.js';
+import { ROOT, RUNTIME, MODELS, MODEL_NAME, config, safeError } from './config.js';
 import { prepareDocuments } from './pdf.js';
-import { runPi } from './pi.js';
-import { validateResult } from './validation.js';
-import { reviewDrawingResult } from './review.js';
+import { runExtractionPipeline } from './pipeline.js';
 
 await fs.mkdir(path.join(RUNTIME, 'uploads'), { recursive: true });
 await fs.mkdir(path.join(RUNTIME, 'jobs'), { recursive: true });
@@ -30,7 +28,7 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.static(path.join(ROOT, 'public')));
-app.get('/api/health', (_req, res) => res.json({ ok: true, configured: Boolean(config.apiKey), model: config.model, models: MODELS, piVersion: '1.4.0' }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, configured: Boolean(config.apiKey), model: config.model, modelName: MODEL_NAME, models: MODELS, piVersion: '1.4.0' }));
 
 async function persist(job) {
   job.updatedAt = new Date().toISOString();
@@ -42,19 +40,10 @@ async function drain() {
   const job = queue.shift();
   try {
     job.status = 'extracting'; job.message = '读取 PDF 文本并生成图纸证据'; await persist(job);
-    const prepared = await prepareDocuments(job.files, jobPath(job.id), { renderImages: job.model === 'deepseek-flash' });
+    const prepared = await prepareDocuments(job.files, jobPath(job.id));
     job.status = 'running'; job.message = '通过 Pi 加载 skill，调用 DeepSeek 提取要求'; await persist(job);
-    const run = await runPi({ directory: jobPath(job.id), ...prepared, model: job.model, onProgress: message => { job.message = message; job.updatedAt = new Date().toISOString(); } });
-    job.status = 'validating'; job.message = '校验结果结构与来源证据'; await persist(job);
-    job.result = validateResult(run.result, prepared);
-    job.result.run = run.metadata;
-    if (process.env.PI_AUTO_REVIEW !== '0') {
-      job.message = '独立核对图纸、尺寸偏差和检验频次'; await persist(job);
-      const reviewed = await reviewDrawingResult({ directory: jobPath(job.id), prepared, result: job.result, model: job.model,
-        onProgress: message => { job.message = '图纸复核：' + message; job.updatedAt = new Date().toISOString(); } });
-      job.result = reviewed.result;
-      job.result.review = reviewed.review;
-    }
+    job.result = await runExtractionPipeline({ directory: jobPath(job.id), prepared, model: job.model,
+      onProgress: message => { job.message = message; if (message.startsWith('逐页查漏')) job.status = 'validating'; job.updatedAt = new Date().toISOString(); } });
     job.status = 'completed'; job.message = `完成：${job.result.requirements.length}条要求，请核对待复核项`;
   } catch (error) { job.status = 'failed'; job.error = safeError(error); job.message = '提取失败，可按提示处理后重试'; }
   finally { await persist(job); busy = false; setImmediate(drain); }

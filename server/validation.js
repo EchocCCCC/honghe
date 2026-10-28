@@ -11,6 +11,10 @@ export const resultSchema = z.object({
   warnings: z.array(z.string()).default([]),
 });
 export const normalizeEvidence = text => String(text).normalize('NFKC').replace(/[\s\u200b\u00ad]/g, '');
+function markReview(item, note) {
+  item.review_required = true;
+  if (!item.review_note.includes(note)) item.review_note = (item.review_note + ' ' + note).trim();
+}
 
 export function validateResult(input, prepared) {
   const checked = resultSchema.safeParse(input);
@@ -26,12 +30,11 @@ export function validateResult(input, prepared) {
       const doc = prepared.documents.find(d => d.name === s.file);
       if (!doc || s.page > doc.pages) {
         s.verification = 'invalid_location';
-        item.review_required = true; item.review_note += ' 来源文件或页码不匹配，请核对。'; continue;
+        markReview(item, '来源文件或页码不匹配，请核对。'); continue;
       }
       const quote = normalizeEvidence(s.quote);
       if (doc.needsVisualReview?.includes(s.page)) {
-        item.review_required = true;
-        item.review_note += ' 当前为纯文本模式，该页图像未核对。';
+        markReview(item, '该页图像未能提交核对，请检查视觉覆盖记录。');
       }
       if (quote.length >= 2 && normalizeEvidence(doc.textPages[s.page - 1]).includes(quote)) {
         s.verification = 'text_match'; verified++;
@@ -39,8 +42,7 @@ export function validateResult(input, prepared) {
         const imagePresent = doc.imagePages.includes(s.page);
         s.verification = imagePresent ? 'visual_review' : 'unmatched_quote';
         if (imagePresent) visual++;
-        item.review_required = true;
-        item.review_note += imagePresent ? ' 图像/图纸证据需人工核对。' : ' 引文未在该页文本连续匹配，需人工核对。';
+        markReview(item, imagePresent ? '图像/图纸证据需人工核对。' : '引文未在该页文本连续匹配，需人工核对。');
       }
     }
   }

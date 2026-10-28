@@ -33,6 +33,8 @@ export function applyReviewPatch(input, patch, allowedIds) {
   return result;
 }
 
+// Kept for replaying the historical focused-review benchmark. Production uses
+// auditAllPages so entirely missing requirements can also be recovered.
 export async function reviewDrawingResult({ directory, prepared, result, model, onProgress = () => {} }) {
   const drawings = prepared.documents.filter(doc => doc.pages <= 2 && doc.imagePages?.length > 0);
   if (!drawings.length) return { result, review: { status: 'skipped', reason: '没有已附图像的短页工程图文件', candidateCount: 0, replacementCount: 0 } };
