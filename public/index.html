@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#12222c">
+  <meta name="description" content="从采购技术条件与零件图纸中提取可追溯的制造工艺要求。">
+  <title>鸿禾 · 工艺要求工作台</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳转到主要内容</a>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <a class="brand" href="/" aria-label="鸿禾工作台首页">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M6 8h8v8H6zM18 8h8v8h-8zM6 20h8v4H6zM18 20h8v4h-8z" fill="currentColor"/><path d="M4 4h24v24H4z" stroke="currentColor" stroke-width="2"/></svg></span>
+        <span><strong>鸿禾</strong><small>工艺智能工作台</small></span>
+      </a>
+      <div class="nav-label">工作空间</div>
+      <nav>
+        <a class="nav-link active" href="#workspace" aria-current="page"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 5h16v14H4zM8 9h8M8 13h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>工艺要求提取<span class="nav-dot"></span></a>
+        <button class="nav-link" id="guide-button" type="button"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 4h10l4 4v12H5V4Z" stroke="currentColor" stroke-width="1.6"/><path d="M14 4v5h5M8 13h8M8 16h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>使用说明<svg class="nav-arrow" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m6 4 4 4-4 4" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      </nav>
+      <div class="sidebar-note"><span class="small-square"></span><p>从资料到工艺<br><strong>每条要求，均有出处。</strong></p></div>
+      <div class="sidebar-bottom">
+        <div class="connection-label"><span class="status-dot" id="connection-dot"></span><span id="connection-text">正在连接服务</span><button class="icon-button health-refresh" id="refresh-health" aria-label="重新检查服务状态" title="重新检查服务状态"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M15.8 7a6 6 0 1 0 .2 5M16 3v4h-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
+        <div class="engine-label">PI AGENT <span>×</span> DEEPSEEK</div>
+      </div>
+    </aside>
+
+    <div class="main-shell">
+      <header class="topbar"><div class="breadcrumb">工作空间<span>/</span><strong>工艺要求提取</strong></div><div class="workspace-badge"><span></span>本地工作空间</div></header>
+      <main id="main">
+        <section id="workspace" aria-labelledby="page-title">
+          <div class="page-heading"><div><div class="eyebrow">MANUFACTURING INTELLIGENCE</div><h1 id="page-title">让技术资料，成为工艺依据<span class="heading-dot">。</span></h1><p class="page-description">导入技术条件与零件图纸，提取工艺要求、关键参数和原文依据。</p></div><span class="heading-label">文档解析 / 工艺提取</span></div>
+
+          <div class="alert" id="global-alert" role="alert" hidden><span id="alert-text"></span><button class="icon-button" id="dismiss-alert" aria-label="关闭提示">×</button></div>
+
+          <section class="input-card" aria-labelledby="input-title">
+            <div class="section-head"><div class="section-title"><span class="step-number">01</span><h2 id="input-title">导入资料</h2><span class="section-caption">支持多份资料联合提取</span></div><span class="tag subtle-tag">PDF</span></div>
+            <div class="input-body">
+              <div class="upload-area">
+                <label class="dropzone" id="dropzone" for="file-input" tabindex="0"><input id="file-input" type="file" accept="application/pdf,.pdf" multiple><span class="upload-icon" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><path d="M10 4h9l6 6v18H7V7a3 3 0 0 1 3-3Z" stroke="currentColor" stroke-width="1.5"/><path d="M18 4v7h7M16 23V14m0 0-4 4m4-4 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span><strong>将 PDF 拖到这里，或<span>选择文件</span></strong><small>采购技术条件、产品图纸、工艺文件 · 每次最多 10 份</small></label>
+                <ul class="file-list" id="file-list" aria-label="待处理文件" hidden></ul>
+                <div class="upload-footer"><span><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m8 1 5 2v4c0 3-5 7-5 7S3 10 3 7V3l5-2Z" stroke="currentColor" stroke-width="1.2"/><path d="m5.5 7 1.6 1.6L10.5 5" stroke="currentColor" stroke-width="1.2"/></svg>文档将发送至所配置的模型服务进行分析</span><button class="text-button" id="clear-files" type="button" hidden>清空文件</button></div>
+              </div>
+              <div class="run-panel"><label class="field-label" for="model-select">提取模型</label><div class="select-wrap"><select id="model-select"><option value="deepseek-flash">DeepSeek Flash</option><option value="deepseek-v4-pro">DeepSeek V4 Pro</option></select><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 6 4 4 4-4" stroke="currentColor" stroke-width="1.5"/></svg></div><p class="model-hint" id="model-hint">支持文字与图像，推荐用于图纸和扫描件。</p><div class="run-divider"></div><div class="process-note"><span class="mini-check">✓</span> 保留原文、页码与文件来源</div><div class="process-note"><span class="mini-check">✓</span> 标记不明确及待复核要求</div><button class="primary-button" id="start-button" type="button" disabled><span id="start-label">开始提取</span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 10h12m-5-5 5 5-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button><p class="start-hint" id="start-hint">添加文件后即可开始</p></div>
+            </div>
+          </section>
+
+          <section class="progress-card" id="progress-section" aria-labelledby="progress-title" hidden><div class="progress-heading"><div><span class="working-indicator" id="working-indicator"></span><h2 id="progress-title">正在处理资料</h2></div><span id="elapsed-time">00:00</span></div><ol class="progress-steps" aria-label="处理步骤"><li data-stage="queued"><span>1</span>上传资料</li><li data-stage="extracting"><span>2</span>解析文档</li><li data-stage="running"><span>3</span>提取工艺</li><li data-stage="validating"><span>4</span>校验结果</li></ol><p id="progress-message" role="status" aria-live="polite">正在创建提取任务…</p></section>
+
+          <section class="results-section" aria-labelledby="results-title">
+            <div class="results-heading"><div class="section-title"><span class="step-number">02</span><h2 id="results-title">提取结果</h2><span class="section-caption" id="results-caption">以原文为依据，逐条追溯</span></div><div class="export-actions" id="export-actions" hidden><button class="secondary-button compact" id="export-csv" type="button"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2v8m-3-3 3 3 3-3M3 11v3h10v-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>导出 CSV</button><button class="secondary-button compact" id="export-json" type="button">JSON<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2v8m-3-3 3 3 3-3M3 11v3h10v-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div></div>
+
+            <div class="empty-state" id="empty-state"><div class="empty-illustration" aria-hidden="true"><div class="empty-paper"><span></span><span></span><span></span><i>✓</i></div><div class="empty-grid"></div></div><h3>工艺依据，从一份资料开始</h3><p>上传 PDF 并开始提取，结果将在这里呈现。</p><div class="empty-features"><span>工艺分类</span><b>·</b><span>参数提取</span><b>·</b><span>原文追溯</span></div></div>
+
+            <div id="result-content" hidden><div class="result-summary" id="result-summary"></div><div class="quality-notice" id="quality-notice" hidden></div><div class="warnings-panel" id="warnings-panel" hidden><button id="warnings-toggle" type="button" aria-expanded="false"><span class="warning-icon">!</span><strong id="warnings-label">提取提示</strong><span class="chevron">⌄</span></button><ul id="warnings-list" hidden></ul></div><div class="results-toolbar"><div class="filter-tabs" role="group" aria-label="要求筛选"><button class="filter-tab active" id="all-filter" data-filter="all" type="button" aria-pressed="true">全部要求 <span id="all-count">0</span></button><button class="filter-tab" id="review-filter" data-filter="review" type="button" aria-pressed="false">待复核 <span id="review-count">0</span></button></div><div class="result-filters"><label class="sr-only" for="category-filter">按工艺类别筛选</label><select id="category-filter"><option value="">全部类别</option></select><label class="search-field"><svg viewBox="0 0 18 18" fill="none" aria-hidden="true"><circle cx="7.5" cy="7.5" r="4.8" stroke="currentColor" stroke-width="1.4"/><path d="m11 11 4 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg><input id="search-input" type="search" placeholder="搜索要求、参数、原文…" aria-label="搜索提取结果"></label></div></div><div class="list-caption"><span id="visible-count"></span><span>要求 / 参数 / 来源</span></div><div id="requirements-list" class="requirements-list"></div><div class="no-results" id="no-results" hidden><strong>未找到匹配的要求</strong><p>试试其他关键词，或调整筛选条件。</p><button id="reset-filters" type="button" class="text-button">重置筛选</button></div><div class="result-footer"><span class="result-footer-mark">✓</span><p>模型输出需要工艺人员复核，尤其是图纸标注、适用范围与“待复核”项目。</p></div></div>
+          </section>
+        </section>
+        <footer class="page-footer"><span>鸿禾 · 工艺智能工作台</span><span>REQUIREMENTS WITH EVIDENCE</span></footer>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="guide-dialog"><div class="dialog-header"><div><span class="eyebrow">WORKSPACE GUIDE</span><h2>开始一次可追溯的提取</h2></div><button class="icon-button dialog-close" id="close-guide" aria-label="关闭使用说明">×</button></div><ol class="guide-steps"><li><span>01</span><div><strong>导入相关资料</strong><p>将同一零件的采购技术条件、图纸等 PDF 一起上传。资料越完整，适用范围越容易核对。</p></div></li><li><span>02</span><div><strong>选择模型并开始提取</strong><p>Flash 支持文字与图像，推荐用于图纸和扫描件；当前 V4 Pro 流程仅分析可提取文字，图形与扫描区域需人工复核。后台通过 Pi Agent 执行提取技能。</p></div></li><li><span>03</span><div><strong>核对原文并导出</strong><p>展开每条要求的“原文依据”查看文件名、页码与摘录。优先复核含糊、冲突或识别不清的内容。</p></div></li></ol><div class="guide-note"><strong>服务配置</strong><p>请在项目的 .env 文件中配置 DeepSeek API 密钥，再启动服务。密钥仅由后端读取。上传的文档内容会发送至配置的模型接口。</p></div><button class="primary-button guide-done" id="guide-done" type="button">知道了</button></dialog>
+</body>
+</html>
