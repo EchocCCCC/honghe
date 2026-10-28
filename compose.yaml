@@ -6,6 +6,10 @@ services:
     env_file: .env
     environment:
       HOST: 0.0.0.0
+      PYTHON_PATH: /opt/pdf-runtime/bin/python
+      PDFTOTEXT_PATH: pdftotext
+      PDFTOPPM_PATH: pdftoppm
+      PDFINFO_PATH: pdfinfo
     volumes:
       - honghe-data:/app/runtime
     init: true

@@ -1,98 +1,100 @@
-# 鸿禾 · 工艺要求提取工作台
+# 鸿禾 · 技术规范与图纸工艺要求工作台
 
-上传 PDF → 逐物理页提取文字并渲染图像 → 每批最多12张图分批 **启动真实 Pi CLI `-p --mode json`** → DeepSeek 4.1 Flash提取 → 对全部负责页逐页查漏及修正 → 校验结构和引文 → 网页筛选、定位原文与导出。
+两阶段流程：**技术规范 → 规范规则库；选定规范版本＋单个零件图纸 → 制造要求、检验要求、待确认项**。同一规范可关联多张图纸，每个零件独立处理和导出。
 
-项目不把 API 直连伪装成 Pi，也不把预先整理的参考答案作为网页提取结果。`evaluation/gold.json` 仅用于离线评估，不进入运行提示。
-
-所有模型阶段固定使用 **DeepSeek 4.1 Flash**。官方API标识为 `deepseek-flash`，2026-10-28文档对应 `DeepSeek-V4.1-Flash-1017`；没有Pro入口或其他模型回退。供应商API别名可能升级，它不是不可变版本锁。PDF解码/渲染仍由Poppler等确定性工具执行，运行时不调用GPT。
+全部模型调用由真实 Pi CLI `-p --mode json` 执行，固定使用 DeepSeek 4.1 Flash（API ID `deepseek-flash`）。2026-10-28官方文档映射为 `DeepSeek-V4.1-Flash-1017`；供应商别名可能升级，不是不可变版本锁。没有Pro入口、其他模型回退或运行时GPT调用。PDF文字层和图像由Poppler读取。
 
 ## 本地启动
 
-需要 **Node.js 24 LTS（最低22.19）**、pnpm 11.25，以及 Poppler 的 `pdftotext`、`pdftoppm`、`pdfinfo`。Windows 可安装 Poppler 并把其 `Library/bin` 加入 PATH，或在 `.env` 配置三个可执行文件的绝对路径。Linux 可安装 `poppler-utils`。建议使用下方 Docker 方式避免本机依赖差异。
+需要Node.js 24 LTS（最低22.19）、pnpm 11.25及Poppler的pdftotext、pdftoppm、pdfinfo，以及Python 3.10+和requirements-pdf.txt中的表格结构依赖。Windows可在.env填写三个工具的绝对路径；Linux安装poppler-utils。
 
 ```powershell
 pnpm install --frozen-lockfile
+python -m pip install -r requirements-pdf.txt
 Copy-Item .env.example .env
-# 编辑 .env，填入自己的 DEEPSEEK_API_KEY
+# 编辑.env，填入自己的DEEPSEEK_API_KEY；不要覆盖已有有效配置
 pnpm doctor
 pnpm start
 ```
 
-打开 http://127.0.0.1:3000 。当前交付目录的本地 `.env` 已按会话中的授权配置；不要用示例覆盖已有配置。密钥不会提交 Git，也不包含在交付压缩包中。
+打开 http://127.0.0.1:3000 。本地交付目录已按会话授权配置.env（含Python工具路径）；压缩包和Git不含密钥。也可准备.env后执行 `docker compose up --build`，容器构建配置包含Poppler和独立Python表格环境，Compose端口默认仅对本机开放。
 
-`pnpm doctor` 只检查本地依赖；`node scripts/doctor.js --api` 才访问模型列表。若系统中有多个 Node，必须使用满足最低版本的 Node 启动服务，Pi 子进程继承同一解释器。
+## 网页操作
 
-## Docker
+1. 上传一份技术规范，建立规范库。每份规范保留文件哈希、解析Skill哈希、规范编号/版次及独立ID。
+2. 查看规则、适用条件、例外、默认覆盖关系、原文证据、外部引用和待确认项。同一文件与解析版本已存在时复用正在处理或已完成的规范库。
+3. 选择已经建立的规范版本，批量导入对应图纸。每批最多20个PDF，每个默认25MB。
+4. 按零件切换，查看制造/检验/待确认项和全部规则的适用性处置表；展开证据打开对应规范或图纸物理页。
+5. 导出单零件JSON或CSV。JSON保留身份、要求、规则处置、原文依据和运行记录。
 
-```text
-docker compose up --build
-```
+`?spec=ID&batch=ID&drawing=ID`支持恢复指定结果。默认保留所有生产阶段的条件；也可指定样件、试生产、批产。没有输入的属性应保留待确认，不推定材料形态、厚度、类别或生产阶段。
 
-先准备 `.env` 中的密钥。Compose 默认只把端口暴露给本机，上传资料和结果保存于命名卷。Docker 环境内已安装 Poppler，无需填写 Windows 可执行文件路径。
+规范可以多页，每个PDF最多100个物理页；初提每批最多12张图片、8个物理页，查漏每批最多4页。正文文字与格线结构合计最多180万字节，超出明确要求拆分。表格候选页在查漏时补充5200像素重叠局部。逐图阶段当前单个零件PDF最多提交12张图像，通常为1—2个物理页（每页整图＋4张局部图）；超过上限明确失败并要求按单零件有效页拆分，绝不静默丢页。图纸局部图从长边5200像素重新渲染并重叠，整图长边2600像素，扫描版竖向图纸同样提供局部图。
 
-## 使用
+模型任务共享最多2个并发执行槽，队列容量40。每个Pi调用默认超时10分钟，可用PI_TIMEOUT_MS调整。一个零件失败不影响其他零件继续，整批会明确显示部分失败。服务重启前未完成任务会标失败，重新提交可复用已经完成的规范版本。
 
-1. 添加采购技术条件及对应工程图 PDF，每次最多10个，每个默认25MB、100页，合计最多200个物理页。
-2. 点击“开始提取”，全部提取和核对固定使用 `deepseek-flash`（4.1 Flash）图文模式。
-3. 完成后按分类、关键字、待复核筛选；展开证据查看文件、物理页码与原文，并可打开对应 PDF。
-4. 导出 JSON 保留所有字段；CSV 用于清单复核。结果是要求提取，不是批准投产的工艺卡。
+## 两个Skill与中间契约
 
-复杂资料需要几分钟。默认一个任务运行、最多五个排队，每次Pi调用超时为10分钟，可用 `PI_TIMEOUT_MS` 调整。失败任务明确返回错误，不用空表或示例结果表示成功。刷新浏览器可恢复最近一个任务，`?job=任务ID` 可直接打开任务，服务重启前未完成的任务需重新提交。
+- `skills/specification-rule-parser/SKILL.md`：完整解析规范正文、表格和脚注，保留强度、材料/区域/阶段/批次条件、例外、覆盖政策、外部依赖和证据；随后逐页独立查漏，允许有来源地补整条规则。
+- `skills/drawing-requirements-matcher/SKILL.md`：识读单张图纸，以选定规则包逐条判断applicable、not_applicable、overridden、needs_confirmation；合并图纸直接要求并独立重读原图复核。复核只返回有证据的新增、替换、移除和处置补丁，后台合并后重新校验完整清单，避免重复生成长清单导致截断。输出制造、检验和待确认清单，不设计工序或编造参数。
 
-文字层不能证明页面没有图形内容，因此每个物理页都渲染，不再仅选横向页或有表标题的页。横向工程图额外提供四个局部放大图，末尾空白物理页也保留。图像按页打包分批，单次最多12张、8个物理页，整页与其局部图不会拆散；达到单批上限会新建批次，不丢弃后续页面。
+规范解析先用pdfplumber读取向量格线及单元格矩形，按真实矩形覆盖展开合并值；空格不按邻格填充。结构候选与原图共同交给Flash，扫描表格仍依赖视觉识读；不可见/裁字不能因文字层存在而当确定要求。原结构保存在table-structure.json。
 
-第二阶段对每个批次的负责页逐条查漏，读取完整当前结果作为上下文：既可修正已有条目，也可用本批原文证据补回完全漏掉的独立要求。新增条目必须有真实文件/物理页来源，不能用外部标准或常识补工艺。语句相同但范围/材料状态/参数不同的要求不会被去重；仅完全等价的技术事实合并。新增条目和不确定标注仍需人工确认。
+规则包保存metadata、rules、warnings及来源覆盖/运行记录；每条规则包含requirement、strength、conditions、exceptions、overridePolicy、externalReferences、parameters、sources等。完整模型契约写在相应Skill内，后端验证定义在 `server/two-stage-schema.js`。
 
-查漏阶段只处理负责页，不能推断其他页遗漏；自由文本提示不会自动覆盖第一次提取的全局warnings。该阶段同样通过 `pi -p` 调用Flash，会增加API用量；`PI_AUTO_REVIEW=0` 可关闭并明确显示复核未执行。失败任务不展示为完整成功。
+逐图传输使用固定来源代号S1/D1，后端精确恢复原文件名后验证；不按相似文件名猜测来源。用户选定的规范版本保持绑定，外部未注日期引用规则不会自动升级当前规范库。
 
-网页“原文覆盖与复核范围”显示物理页、已提交图像页、失败页和提取/核对批次。覆盖数字证明已提交到模型，**不证明识读正确、语义完整或与GPT完全一致**。
+逐图结果每个R编号必须恰好一条处置。适用、覆盖、待确认规则必须关联至少一个要求；不适用规则不能进入有效清单。图纸独有要求保留空ruleIds。后端拒绝未知规则、重复处置、漏处置、越界页码及其他零件来源。相同文字但条件、强度、参数不同的规则不会合并。
 
-程序另对横向图纸做独立小数检查：比较文字层的小数与同页要求/参数，排除原文引文和字母数字型号，提示疑似未覆盖值；不自动编造其工程含义。同一个值出现在别的特征里也可能造成假覆盖，所以这个检查只能提示复核。
+内部质量按受检区域局部壁厚分档时，此版不自动把总高、台阶高、槽尺寸等当壁厚。缺少人工确认的区域壁厚时，程序将相关复合条目拆回原规范条件和完整分档，处置为待确认；机器原选档候选保留，变更有记录。这是保守约束，不能视为已经确认了壁厚或某个验收档。原材料公称厚度/直径同样尚无人工确认入口，成品局部尺寸不能直接选力学性能档；保留原规范完整条件待确认。耐压/爆破/水压不自动替代气密试验压力。图面标准号缺少精确文字证据时只标候选，不猜测改号；模型引文自身也可能误读，仍需按原图核对。
 
-## Skill 与后端调用
+这些结构检查能拦截特定错误，不能证明材料/区域识别、适用性判断或提取语义正确。规范解析中的疑点会传递到关联要求；一处规范误读可能影响多张图，需回到原文核对。外部标准仅见引用而未提供全文时，不宣称已经解析其细则。
 
-主文件：`skills/manufacturing-requirements-extractor/SKILL.md`。它包含输入资料边界、逐页/表格/工程图抽取、参数忠实性、图纸优先关系、外部引用缺失处理与 JSON 契约。
+## Pi执行与记录
 
-后端 `server/pi.js` 用参数数组运行锁定版本 `@earendil-works/pi-coding-agent@1.4.0`，效果等同：
+`server/pi.js`以参数数组、关闭shell执行锁定版本 `@earendil-works/pi-coding-agent@1.4.0`。两阶段都使用：
 
 ```text
 pi -p --mode json --provider deepseek-extract --model deepseek-flash
   --thinking high --no-session --no-extensions --no-mcp --no-skills
   --no-prompt-templates --no-context-files --no-approve --no-tools
-  --skill /absolute/skills/manufacturing-requirements-extractor
-  --system-prompt /absolute/skills/manufacturing-requirements-extractor/SKILL.md
-  @/absolute/job/source.txt @/absolute/job/doc-1-page-1.png
-  "提取所附全部资料的工艺要求……只输出契约 JSON。"
+  --skill /absolute/selected-skill --system-prompt /absolute/run/skill-used.md
+  @/absolute/run/input.txt @/absolute/run/page.png "任务模式与JSON契约……"
 ```
 
-`--system-prompt` 确保完整 skill 确实进入模型上下文：Pi 会把 `@文件` 文本放在消息最前面，单靠消息末尾 `/skill:` 快捷命令可能不展开。后端同时关闭文档内容可利用的命令执行、文件读取、MCP及自动扩展。子进程的标准输入会立即关闭，以避免 print 模式等待输入。
+系统提示使用Skill快照，客户资料只作为待分析数据。Pi无命令/文件/MCP工具；stdin立即关闭，stdout严格按UTF-8及LF解析JSONL，并检查正常结束及完整JSON。每次保存Skill哈希、调用模型、用量及附件数。自定义供应商未配置计价，Pi用量中的cost=0不代表没有API费用，实际费用以供应商账单为准。apiKey只通过子进程环境传入，生成配置使用环境变量引用。
 
-每个任务的 `extraction/Bxx/pi-config` 和 `coverage-review/Bxx/pi-config` 都隔离配置；`apiKey` 使用 `$DEEPSEEK_API_KEY` 环境插值，源密钥只在服务端。每次调用留存skill快照/哈希、模型标识和用量。stdout按UTF-8＋LF严格解析JSONL，检查正常结束、完整JSON、字段结构及来源，不用正则修补缺失数据。
+规范文件在 `runtime/specifications/ID/`；图纸批次在 `runtime/drawing-batches/ID/零件ID/`。规则库按原PDF哈希＋解析Skill哈希＋PIPELINE_VERSION复用；修改影响解析的代码时应更新管线版本。已完成规范版本不被后续任务覆盖，换规范必须选择新版本重跑图纸。
 
-## 真集和真实评估
+## API
 
-- `evaluation/gold.json`：历史148项GPT参考要求；参考集也可能有判读错误，不能当成未经核实的绝对真值。
-- `evaluation/GOLD_NOTES.md`：复核范围、原文歧义和评分边界。该参考集尚未经铸造工程师签认。
-- `evaluation/REPORT.md`：实际运行的版本、结果、问题和修正。
-- `evaluation/skills/`：保留参与对比的 skill 版本；最终版本在 `skills/`。
-- `evaluation/comparison-20261028/`：本轮GPT先独立读原始PDF、冻结事实，再对比旧栈和全Flash逐页输出；原图证据、参考纠错及逐项差异仅随本地包提供。
+- `GET /api/specifications`：规范库列表。
+- `POST /api/specifications`：multipart单文件file，可选label；返回id与cached。
+- `GET /api/specifications/:id`：进度和完整规则库；`/file`返回原PDF。
+- `POST /api/drawing-batches`：multipart字段specificationId、files、stage（all/sample/trial/batch）。
+- `GET /api/drawing-batches/:id`：批次进度、各零件独立结果。
+- `GET /api/drawing-batches/:id/drawings/:drawingId`：单零件结果；`/file`返回该图纸PDF。
+- `POST /api/drawing-batches/:id/drawings/:drawingId/retry`：只重新核对该零件。正常结束的完整初次JSON可复用，截断初次输出不复用；原结果和失败运行均保留。
 
-参考集、逐条审查和实际提取样例随本地完整交付包提供，原PDF由使用者保留；公开Git仓库只保存通用代码、skill及评估工具，不上传客户文件或其详细技术清单。
+旧 `/api/jobs`及旧Skill仅保留历史运行兼容，当前网页走两阶段API。PI_AUTO_REVIEW仅控制旧管线，当前两阶段流程固定执行规范查漏和逐图复核。
 
-把原PDF分别复制到 `evaluation/fixtures/specification.pdf` 和 `drawing.pdf`，然后：
+## 验证与评估
 
 ```text
-pnpm evaluate --label local-run --model deepseek-flash
-node scripts/score.js evaluation/runs/local-run/result.json
 pnpm test
+node scripts/evaluate-two-stage.js --manifest /absolute/private/manifest.json --output /absolute/private/results --stage specs
+node scripts/evaluate-two-stage.js --manifest /absolute/private/manifest.json --output /absolute/private/results --stage representatives
+node scripts/evaluate-two-stage.js --manifest /absolute/private/manifest.json --output /absolute/private/results --stage remaining
 ```
 
-评估调用会产生 DeepSeek API 费用。`score.js` 只是页码与关键词候选定位器，输出 `UNREVIEWED` 核对表，不能把它当成事实准确率。完整语义判断须核对数值、前提、遗漏、矛盾和新增要求。两份资料是调优开发集，不构成未知图纸的泛化证明。
+manifest为JSON数组，每项包含series（组标识）、kind（spec或drawing）、source（PDF绝对路径）。代表图为每组第一张，余下图纸可作为未参与调试的验证样本。评估脚本通过工作台HTTP API调用实际Pi任务，会消耗DeepSeek额度；参考答案不会进入模型提示。
 
-## 文件和部署边界
+私有 `evaluation/two-stage-20261028/` 保存原图独立核对的有限事实集、冻结哈希、实际结果和比较记录。历史gold与comparison只保留为迭代记录，其中已有参考勘误，不能当绝对真值。公开Git只存通用代码、两个Skill和评估工具，不上传客户资料、详细事实清单、原图截图或运行结果。
 
-默认只监听本机；请求不跨域开放。API密钥、原PDF、任务目录和原始评估运行记录均被 `.gitignore` 排除。上传资料会发送给所选 DeepSeek 服务用于分析；本机原件、渲染图和结果保存在 `runtime/`，由使用者按需要清理。
+网页页面覆盖与规则处置数只是输入及处理记录，不是正确率。小数检查是文字层遗漏提示，不能识别扫描图全部数值，也不能证明符号与对象对应正确。
 
-本项目需要操作系统子进程及 Poppler，因此面向本机、虚拟机或 Docker 服务器。对外多人部署时请在反向代理中配置登录、HTTPS和访问权限，再将服务置于其后。
+## 数据边界
 
-官方依赖依据：[Pi仓库](https://github.com/earendil-works/pi)、[Pi CLI](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/cli.md)、[模型配置](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models-configuration.md)、[DeepSeek模型映射](https://api-docs.deepseek.com/quick_start/pricing/)。
+默认只监听本机，拒绝跨站POST和不允许的主机。原PDF、图像、规则与结果保存在runtime并被Git忽略；上传资料按用户操作发送至已配置DeepSeek接口。该应用需要操作系统子进程和Poppler，适合本机、虚拟机或Docker；多人对外部署需另配认证、HTTPS与访问权限。
+
+官方依赖依据：[Pi仓库](https://github.com/earendil-works/pi)、[CLI](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/cli.md)、[模型配置](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models-configuration.md)、[DeepSeek模型映射](https://api-docs.deepseek.com/quick_start/pricing/)。

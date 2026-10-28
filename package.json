@@ -1,7 +1,7 @@
 {
   "name": "honghe",
-  "version": "1.0.0",
-  "description": "基于 Pi Agent + DeepSeek 的铸件工艺要求提取工作台",
+  "version": "2.0.0",
+  "description": "基于 Pi Agent + DeepSeek 的技术规范建库与逐零件工艺要求工作台",
   "main": "server/app.js",
   "scripts": {
     "start": "node server/app.js",

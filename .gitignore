@@ -12,6 +12,7 @@ evaluation/reviews/
 evaluation/samples/
 evaluation/source-crops/
 evaluation/comparison-20261028/
+evaluation/two-stage-20261028/
 docs/ui*.png
 *.log
 test-results/

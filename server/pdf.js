@@ -34,7 +34,7 @@ async function pngDimensions(filename) {
   return [width, height];
 }
 
-export async function prepareDocuments(files, directory, { renderImages = true } = {}) {
+export async function prepareDocuments(files, directory, { renderImages = true, detailMode = false } = {}) {
   await fs.mkdir(directory, { recursive: true });
   const documents = [], images = [], warnings = [], pageDescriptors = [];
   let totalPages = 0;
@@ -95,13 +95,17 @@ export async function prepareDocuments(files, directory, { renderImages = true }
         descriptor.landscape = pixelWidth > pixelHeight * 1.15;
         descriptor.imagePaths.push(imagePath); images.push(imagePath); doc.imagePages.push(page);
         allText += `[该页附图：${path.basename(imagePath)}。请核对正文、嵌入图、符号与表格。]\n`;
-        if (descriptor.landscape) {
-          const halfWidth = Math.ceil(pixelWidth / 2), halfHeight = Math.ceil(pixelHeight / 2);
+        if (descriptor.landscape || detailMode) {
+          // Drawing mode renders crops at twice the overview resolution. Cropping
+          // the overview alone would not add any readable detail to scanned notes.
+          const scale = detailMode ? 5200 : 2600;
+          const cropWidth = Math.round(pixelWidth * scale / 2600), cropHeight = Math.round(pixelHeight * scale / 2600);
+          const halfWidth = Math.ceil(cropWidth / 2), halfHeight = Math.ceil(cropHeight / 2), overlap = detailMode ? 100 : 0;
           for (let tile = 0; tile < 4; tile++) {
-            const x = (tile % 2) * halfWidth, y = Math.floor(tile / 2) * halfHeight;
+            const x = Math.max(0, (tile % 2) * halfWidth - overlap), y = Math.max(0, Math.floor(tile / 2) * halfHeight - overlap);
             const target = `${prefix}-tile-${tile + 1}`;
             try {
-              await runProcess(poppler.render, ['-f', String(page), '-l', String(page), '-singlefile', '-scale-to', '2600', '-x', String(x), '-y', String(y), '-W', String(Math.min(halfWidth, pixelWidth - x)), '-H', String(Math.min(halfHeight, pixelHeight - y)), '-png', file.path, target], { timeout: 90000 });
+              await runProcess(poppler.render, ['-f', String(page), '-l', String(page), '-singlefile', '-scale-to', String(scale), '-x', String(x), '-y', String(y), '-W', String(Math.min(halfWidth + overlap * 2, cropWidth - x)), '-H', String(Math.min(halfHeight + overlap * 2, cropHeight - y)), '-png', file.path, target], { timeout: 90000 });
               await pngDimensions(target + '.png');
               descriptor.imagePaths.push(target + '.png'); images.push(target + '.png');
               allText += `[同页局部放大图：${path.basename(target)}.png，位置${['左上', '右上', '左下', '右下'][tile]}；来源仍为物理页${page}。]\n`;
@@ -127,4 +131,39 @@ export async function prepareDocuments(files, directory, { renderImages = true }
   await fs.writeFile(manifestPath, JSON.stringify({ ...coverage, pages: pageDescriptors.map(({ text, imagePaths, ...page }) => ({ ...page, textCharacters: text.length, images: imagePaths.map(filename => path.basename(filename)) })) }, null, 2));
   if (!pageDescriptors.some(page => !page.blankText) && !images.length) throw new Error('未发现可识别文字，且所有物理页均缺少图像，请检查 Poppler 后重试');
   return { documents, images, warnings, sourcePath, pages: pageDescriptors, coverage };
+}
+
+// All pages already have overviews. Give table candidates and image-only pages
+// extra resolution for the source-first audit; never use this heuristic to drop pages.
+export async function augmentTableEvidence(prepared, files, directory) {
+  await fs.mkdir(directory, { recursive: true });
+  const annotations = [];
+  for (const page of prepared.pages) {
+    if (!page.blankText && !/表\s*\d+/.test(page.text)) continue;
+    if (!page.imagePaths.length) continue;
+    const file = files.find(f => f.name === page.file);
+    const [width, height] = await pngDimensions(page.imagePaths[0]);
+    const pixelWidth = width * 2, pixelHeight = height * 2;
+    const halfWidth = Math.ceil(pixelWidth / 2), halfHeight = Math.ceil(pixelHeight / 2), overlap = 100;
+    const detail = [];
+    for (let tile = 0; tile < 4; tile++) {
+      const x = Math.max(0, tile % 2 * halfWidth - overlap), y = Math.max(0, Math.floor(tile / 2) * halfHeight - overlap);
+      const prefix = path.join(directory, `${page.docId}-page-${page.page}-detail-${tile + 1}`);
+      try {
+        await runProcess(poppler.render, ['-f', String(page.page), '-l', String(page.page), '-singlefile', '-scale-to', '5200', '-x', String(x), '-y', String(y), '-W', String(Math.min(halfWidth + 200, pixelWidth - x)), '-H', String(Math.min(halfHeight + 200, pixelHeight - y)), '-png', file.path, prefix], { timeout: 90000 });
+        await pngDimensions(prefix + '.png'); detail.push(prefix + '.png');
+      } catch {
+        const doc = prepared.documents.find(d => d.name === page.file);
+        if (!doc.needsVisualReview.includes(page.page)) doc.needsVisualReview.push(page.page);
+        prepared.warnings.push(`${page.file} 第${page.page}页：表格高分辨率局部${tile + 1}生成失败。`);
+      }
+    }
+    const oldTiles = new Set(page.imagePaths.slice(1));
+    prepared.images = prepared.images.filter(image => !oldTiles.has(image));
+    page.imagePaths = [page.imagePaths[0], ...detail]; prepared.images.push(...detail);
+    annotations.push({ file: page.file, page: page.page, images: detail.map(image => path.basename(image)), note: '同页5200像素重叠局部，按表格格线核对合并单元格的实际上下覆盖范围。' });
+  }
+  await fs.appendFile(prepared.sourcePath, `\n<VISUAL_TABLE_EVIDENCE_DATA>\n${JSON.stringify(annotations)}\n</VISUAL_TABLE_EVIDENCE_DATA>\n`);
+  prepared.coverage.totalImages = prepared.images.length;
+  return prepared;
 }

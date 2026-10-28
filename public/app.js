@@ -1,496 +1,365 @@
 "use strict";
 
 (() => {
-  const $ = (id) => document.getElementById(id);
-  const state = { files: [], busy: false, configured: false, jobId: null, result: null, filter: "all", startedAt: 0, timer: null, pollTimer: null, pollErrors: 0 };
-  const stages = ["queued", "extracting", "running", "validating"];
-  const MODEL = "deepseek-flash";
+  const $ = id => document.getElementById(id);
+  const state = { configured: false, specifications: [], specId: null, specJob: null, specSubmitting: false, drawingSubmitting: false, files: [], batchId: null, batch: null, drawingId: null, resultKey: "", filter: "all", search: "", pollTimer: null, pollRunning: false, pollErrors: 0, specListRequest: null, specRequests: new Map(), specListKey: "", retryingDrawings: new Set() };
+  const statusNames = { queued: "等待处理", preparing: "读取页面", extracting: "解析规则", matching: "匹配要求", auditing: "核对原文", running: "正在处理", completed: "已完成", partial: "部分完成", failed: "未完成" };
+  const strengthNames = { required: "必须", prohibited: "禁止", recommended: "推荐", permitted: "允许", reference: "参考", conditional: "条件适用" };
+  const dispositionNames = { applicable: "适用", not_applicable: "不适用", overridden: "图纸覆盖", needs_confirmation: "待确认" };
+  const originNames = { drawing: "图纸要求", specification: "规范要求", combined: "规范＋图纸" };
+  const stageNames = { all: "保留全部阶段条件", sample: "样件阶段", trial: "试生产阶段", batch: "批量生产阶段" };
+  const list = value => Array.isArray(value) ? value : [];
+  const str = (value, fallback = "") => value == null ? fallback : typeof value === "object" ? JSON.stringify(value) : String(value);
+  const active = value => Boolean(value) && !["completed", "partial", "failed"].includes(value);
+  const enc = value => encodeURIComponent(str(value));
+  const el = (tag, cls, text) => { const node = document.createElement(tag); if (cls) node.className = cls; if (text != null) node.textContent = str(text); return node; };
+  const showAlert = message => { $("alert-text").textContent = str(message); $("global-alert").hidden = false; };
+  const clearAlert = () => { $("global-alert").hidden = true; };
+  const selectedDrawing = () => list(state.batch?.drawings).find(item => item.id === state.drawingId);
+  const currentResult = () => selectedDrawing()?.result;
+  const inspection = item => /检验|检测|试验|抽检|复验|验收|首件/.test(str(item.category));
+  const needsReview = item => Boolean(item.review_required || str(item.review_note).trim());
+  const uniqueText = values => [...new Set(values.map(value => str(value).trim()).filter(Boolean))];
+  const specificationTitle = meta => uniqueText([meta?.number, meta?.version]).join(" · ");
+  function creationLabel(spec, batchFirst = false) {
+    const created = new Date(spec.createdAt), batch = spec.id ? `解析批次 ${str(spec.id).slice(0, 8)}` : "";
+    const when = spec.createdAt && !Number.isNaN(created.getTime()) ? `建立于 ${new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(created)}` : "建立时间未记录";
+    return (batchFirst ? [batch, when] : [when, batch]).filter(Boolean).join(" · ");
+  }
+  const specListKey = () => JSON.stringify([state.specId, state.specifications.map(({ id, status, name, metadata, ruleCount, warningsCount, createdAt }) => ({ id, status, name, metadata, ruleCount, warningsCount, createdAt }))]);
 
-  function element(tag, className, text) {
-    const el = document.createElement(tag);
-    if (className) el.className = className;
-    if (text !== undefined && text !== null) el.textContent = String(text);
-    return el;
-  }
-  function string(value, fallback = "") {
-    if (value === undefined || value === null) return fallback;
-    return typeof value === "object" ? JSON.stringify(value) : String(value);
-  }
-  function alert(message) {
-    $("alert-text").textContent = message;
-    $("global-alert").hidden = false;
-  }
-  function clearAlert() { $("global-alert").hidden = true; }
-  function readableSize(bytes) { return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`; }
-  function updateStart() {
-    $("start-button").disabled = state.busy || !state.configured || state.files.length === 0;
-    $("file-input").disabled = state.busy;
-    $("dropzone").classList.toggle("disabled", state.busy);
-    $("clear-files").hidden = state.files.length === 0 || state.busy;
-    $("start-label").textContent = state.busy ? "正在提取…" : "开始提取";
-    $("start-hint").textContent = state.busy ? "复杂资料可能需要几分钟" : !state.configured ? "等待后端服务与模型配置就绪" : state.files.length ? `已准备 ${state.files.length} 份资料` : "添加文件后即可开始";
-    document.querySelectorAll(".file-remove").forEach((button) => { button.disabled = state.busy; });
-  }
-
-  async function fetchJson(url, options = {}, timeoutMs = 20000) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  async function api(url, options = {}) {
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 25000);
     try {
       const response = await fetch(url, { ...options, signal: controller.signal });
-      const contentType = response.headers.get("content-type") || "";
-      let data;
-      if (contentType.includes("application/json")) data = await response.json();
-      else throw new Error(`服务返回了无法识别的响应（HTTP ${response.status}）。请检查后端是否正常启动。`);
-      if (!response.ok) throw new Error(string(data.error || data.message, `请求失败（HTTP ${response.status}）`));
+      if (!(response.headers.get("content-type") || "").includes("application/json")) throw new Error(`服务响应无法识别（HTTP ${response.status}），请检查后端状态。`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(str(data.error || data.message, `请求失败（HTTP ${response.status}）`));
       return data;
     } catch (error) {
-      if (error.name === "AbortError") throw new Error("服务响应超时，请检查服务状态后重试。");
-      if (error instanceof TypeError) throw new Error("无法连接到后端服务，请确认服务已启动。");
+      if (error.name === "AbortError") throw new Error("服务响应超时。任务可能仍在后台运行，请刷新状态后再操作。");
+      if (error instanceof TypeError) throw new Error("无法连接到服务，请确认后端已启动。");
       throw error;
     } finally { clearTimeout(timeout); }
   }
-
-  async function checkHealth() {
+  function updateUrl() {
+    const url = new URL(location.href);
+    for (const [key, value] of [["spec", state.specId], ["batch", state.batchId], ["drawing", state.drawingId]]) { if (value) url.searchParams.set(key, value); else url.searchParams.delete(key); }
+    url.searchParams.delete("job"); history.replaceState(null, "", url);
+  }
+  function updateControls() {
+    const specBusy = state.specSubmitting;
+    const drawBusy = state.drawingSubmitting || active(state.batch?.status);
+    $("build-spec").disabled = specBusy || !state.configured || !$("spec-file").files.length;
+    $("spec-file").disabled = specBusy; $("spec-label").disabled = specBusy;
+    $("build-spec").textContent = specBusy ? "正在提交规范…" : "解析并建立规范库 →";
+    $("spec-start-hint").textContent = specBusy ? "上传完成后，规范将在后台解析" : !state.configured ? "等待服务和模型配置就绪" : $("spec-file").files.length ? "整份规范将分批解析并核对" : active(state.specJob?.status) ? "当前规范在后台解析，可继续新增其他规范" : "选择一份规范 PDF 后开始";
+    $("start-drawings").disabled = drawBusy || !state.configured || !$("spec-select").value || !state.files.length;
+    $("drawing-files").disabled = drawBusy; $("spec-select").disabled = drawBusy; $("production-stage").disabled = drawBusy;
+    $("dropzone").classList.toggle("disabled", drawBusy); $("dropzone").setAttribute("aria-disabled", str(drawBusy));
+    $("clear-files").hidden = !state.files.length || drawBusy;
+    $("start-drawings").textContent = drawBusy ? "正在逐件提取…" : "开始逐件提取 →";
+    $("drawing-start-hint").textContent = drawBusy ? "每张图纸独立处理，完成的零件可先查看" : !state.configured ? "等待服务和模型配置就绪" : !$("spec-select").value ? "请先选择已完成的规范版本" : state.files.length ? `已准备 ${state.files.length} 张图纸，逐件生成要求` : "添加与所选规范对应的图纸";
+    document.querySelectorAll(".file-remove").forEach(button => { button.disabled = drawBusy; });
+    $("export-actions").hidden = !currentResult();
+    updateRetryButtons();
+  }
+  async function health() {
     $("refresh-health").disabled = true;
-    try {
-      const data = await fetchJson("/api/health");
-      state.configured = Boolean(data.ok && data.configured);
-      $("connection-dot").className = `status-dot ${state.configured ? "connected" : "error"}`;
-      $("connection-text").textContent = state.configured ? "服务已就绪" : data.ok ? "请配置模型 API 密钥" : "服务尚未就绪";
-      $("connection-text").title = data.piVersion ? `Pi ${data.piVersion}` : "";
-    } catch (error) {
-      state.configured = false;
-      $("connection-dot").className = "status-dot error";
-      $("connection-text").textContent = "服务未连接";
-      $("connection-text").title = error.message;
-    } finally { $("refresh-health").disabled = false; updateStart(); }
+    try { const data = await api("/api/health"); state.configured = Boolean(data.ok && data.configured); $("connection-text").textContent = state.configured ? "服务已就绪" : "请配置模型 API 密钥"; }
+    catch (error) { state.configured = false; $("connection-text").textContent = "服务未连接"; $("connection-text").title = error.message; }
+    finally { $("connection-dot").className = `status-dot ${state.configured ? "connected" : "error"}`; $("refresh-health").disabled = false; updateControls(); }
   }
-
+  function badge(status) { return el("span", `status-tag ${active(status) ? "active" : status === "failed" ? "failed" : status === "partial" ? "partial" : ""}`, statusNames[status] || status || "未知状态"); }
+  function statusBox(job) {
+    const box = el("div", `status-box ${job.status === "failed" ? "failed" : ""}`);
+    const line = el("div", "progress-activity"); if (active(job.status)) line.append(el("span", "spinner"));
+    line.append(el("span", "", job.error || job.message || statusNames[job.status])); box.append(line); return box;
+  }
+  function stats(entries) {
+    const grid = el("div", "stats-grid");
+    for (const [label, value] of entries) { const item = el("div", "stat"); item.append(el("strong", "", value ?? "—"), el("span", "", label)); grid.append(item); }
+    return grid;
+  }
+  function details(title, open = false) {
+    const node = el("details", "details-panel"); node.open = open;
+    const body = el("div", "panel-body"); node.append(el("summary", "", title), body); return { node, body };
+  }
+  function sourceLink(text, url) { const a = el("a", "source-link", text); a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer"; return a; }
+  function context(result, drawing) { return { specId: result?.specification?.id || state.batch?.specificationId, batchId: state.batchId, drawingId: drawing?.id, documents: list(result?.documents) }; }
+  function evidence(sources, ctx = {}) {
+    const rows = list(sources), node = el("details", "evidence"); node.append(el("summary", "", `原文依据 · ${rows.length} 处`));
+    const body = el("div", "evidence-list");
+    for (const source of rows) {
+      const item = el("div", "source-item"), head = el("div", "source-head");
+      const isSpec = ctx.specOnly || ctx.documents?.some(doc => doc.name === source.file && doc.role === "specification");
+      let url = null;
+      if (isSpec && ctx.specId) url = `/api/specifications/${enc(ctx.specId)}/file`;
+      else if (ctx.batchId && ctx.drawingId) url = `/api/drawing-batches/${enc(ctx.batchId)}/drawings/${enc(ctx.drawingId)}/file`;
+      const page = Number(source.page); if (url && Number.isInteger(page) && page > 0) url += `#page=${page}`;
+      head.append(url ? sourceLink(source.file || "原始 PDF", url) : el("span", "", source.file || "来源文件"), el("span", "", `物理页 ${str(source.page, "—")}`));
+      if (source.verification) head.append(el("span", "", ({ text_match: "引文可定位", visual_review: "图像证据待核对", unmatched_quote: "引文待核对", invalid_location: "来源待核对" })[source.verification] || "来源待核对"));
+      item.append(head, el("blockquote", "", source.quote)); if (source.section) item.append(el("div", "source-location", `条款 / 位置：${source.section}`)); body.append(item);
+    }
+    if (!rows.length) body.append(el("p", "placeholder", "未提供可定位证据，请核对。"));
+    node.append(body); return node;
+  }
+  function parameters(items) {
+    const values = list(items); if (!values.length) return null;
+    const ul = el("ul", "parameter-list"); for (const p of values) { const li = el("li", "", p.name); li.append(el("strong", "", `${str(p.value)}${p.unit ? ` ${p.unit}` : ""}`)); ul.append(li); } return ul;
+  }
+  function warnings(items, title = "解析提示与待核对事项") {
+    const values = [...new Set(list(items).map(item => str(item)).filter(Boolean))]; if (!values.length) return null;
+    const panel = details(`${title} · ${values.length} 项`), ul = el("ul", "warning-list"); values.forEach(item => ul.append(el("li", "", item))); panel.body.append(ul); return panel.node;
+  }
+  function coverage(data, review) {
+    if (!data) return null;
+    const panel = details("原文覆盖与核对范围");
+    const reviewBatches = data.reviewBatches ?? review?.batchCount ?? (Array.isArray(review?.runs) ? review.runs.length : review?.metadata ? 1 : undefined);
+    panel.body.append(stats([["物理页数", data.totalPages ?? data.physicalPages], ["已提交图像的页数", data.visualPages ?? data.renderedPages], ["图像缺口", data.failedVisualPages ?? list(data.missingImagePages).length], ["核对批次", reviewBatches]]));
+    if (data.tableStructure) {
+      const structure = data.tableStructure, count = Number.isInteger(structure.tables) && structure.tables >= 0 ? structure.tables : "—";
+      const recovered = el("p", "panel-note"); recovered.append(el("strong", "", `已恢复向量表格 ${count} 张`));
+      if (structure.engine || structure.version) recovered.append(el("span", "", ` · ${[structure.engine, structure.version].filter(Boolean).join(" ")}`));
+      panel.body.append(recovered, el("p", "coverage-note", "按原 PDF 格线展开单元格合并范围，并与原图联合核对；扫描表格仍依赖图像识读。恢复数量不代表提取准确率。"));
+    }
+    if (Number(data.failedVisualPages) > 0) panel.body.append(el("p", "notice", `${data.failedVisualPages} 页图像未能提交，请查看原 PDF。`));
+    panel.body.append(el("p", "coverage-note", data.note || "这些记录说明页面已提交模型，不代表模型理解正确或没有遗漏。图像证据和待确认内容仍需对照原文。")); return panel.node;
+  }
+  function renderSpecList() {
+    state.specListKey = specListKey();
+    const holder = $("spec-list"); holder.replaceChildren(); $("spec-count").textContent = `${state.specifications.length} 个`;
+    for (const spec of state.specifications) {
+      const item = el("button", `library-item ${spec.id === state.specId ? "selected" : ""}`); item.type = "button"; item.setAttribute("aria-pressed", str(spec.id === state.specId));
+      const meta = spec.metadata || {}; item.append(el("strong", "", specificationTitle(meta) || spec.name || "技术规范"), el("small", "", meta.title || spec.name || ""), badge(spec.status));
+      if (spec.status === "completed") item.append(el("small", "", `${spec.ruleCount ?? 0} 条规则${spec.warningsCount ? ` · ${spec.warningsCount} 项提示` : ""}`));
+      item.append(el("small", "creation-meta", creationLabel(spec)));
+      item.addEventListener("click", () => selectSpec(spec.id).catch(error => showAlert(error.message))); holder.append(item);
+    }
+    if (!state.specifications.length) holder.append(el("p", "placeholder", "规范库还没有内容，请先上传一份技术规范。"));
+    const select = $("spec-select"), previous = select.value; select.replaceChildren();
+    const completed = state.specifications.filter(spec => spec.status === "completed"), option = el("option", "", completed.length ? "选择规范版本" : "请先建立技术规范库"); option.value = ""; select.append(option);
+    for (const spec of completed) { const o = el("option", "", [specificationTitle(spec.metadata) || spec.name || "技术规范", creationLabel(spec, true), spec.metadata?.title].filter(Boolean).join(" · ")); o.value = spec.id; select.append(o); }
+    if (completed.some(spec => spec.id === previous)) select.value = previous;
+    else if (completed.some(spec => spec.id === state.specId)) select.value = state.specId;
+    updateControls();
+  }
+  function refreshSpecs() {
+    if (!state.specListRequest) state.specListRequest = api("/api/specifications").then(data => {
+      state.specifications = list(data.specifications);
+      if (state.specListKey !== specListKey()) renderSpecList();
+    }).finally(() => { state.specListRequest = null; });
+    return state.specListRequest;
+  }
+  function fetchSpecJob(id) {
+    if (!state.specRequests.has(id)) state.specRequests.set(id, api(`/api/specifications/${enc(id)}`).finally(() => state.specRequests.delete(id)));
+    return state.specRequests.get(id);
+  }
+  function updateSpecSummary(job) {
+    state.specifications = state.specifications.map(spec => spec.id === job.id ? { ...spec, status: job.status, message: job.message, ...(job.result ? { metadata: job.result.metadata, ruleCount: list(job.result.rules).length, warningsCount: list(job.result.warnings).length } : {}) } : spec);
+    if (state.specListKey !== specListKey()) renderSpecList();
+  }
+  function renderRule(rule, specId) {
+    const card = el("article", "rule-card"), top = el("div", "item-top");
+    top.append(el("span", "item-id", rule.id), el("span", "item-category", rule.category), el("span", "item-strength", strengthNames[rule.strength] || rule.strength || ""));
+    if (needsReview(rule)) top.append(el("span", "status-tag warning", "待确认"));
+    card.append(top, el("p", "item-text", rule.requirement));
+    const params = parameters(rule.parameters); if (params) card.append(params);
+    const fields = el("dl", "rule-fields");
+    for (const [label, value] of [["范围", rule.scope], ["适用条件", list(rule.conditions).join("；")], ["例外", list(rule.exceptions).join("；")], ["覆盖 / 优先关系", rule.overridePolicy], ["引用文件", list(rule.externalReferences).join("；")]]) { if (value) fields.append(el("dt", "", label), el("dd", "", value)); }
+    card.append(fields); if (rule.review_note) card.append(el("p", "review-note", rule.review_note)); card.append(evidence(rule.sources, { specOnly: true, specId })); return card;
+  }
+  function renderSpec(job) {
+    const holder = $("spec-detail"); holder.replaceChildren(); const result = job.result, meta = result?.metadata || {};
+    const head = el("div", "detail-title"), names = el("div"); names.append(el("h3", "", meta.title || job.name || "技术规范"), el("div", "detail-subtitle", uniqueText([meta.number, meta.version && meta.version !== meta.number ? `版本 ${meta.version}` : !meta.version && result ? "版本未识别，待确认" : ""]).join(" · ")), el("div", "detail-subtitle creation-meta", creationLabel(job))); head.append(names, badge(job.status)); holder.append(head);
+    const progress = statusBox(job); progress.id = "spec-progress-status"; holder.append(progress);
+    const links = el("div", "detail-links"); links.append(sourceLink("打开规范原文 ↗", `/api/specifications/${enc(job.id)}/file`));
+    if (result) { const exportButton = el("button", "text-button", "导出规则库 JSON"); exportButton.type = "button"; exportButton.addEventListener("click", () => download(JSON.stringify(result, null, 2), `${specificationTitle(meta) || "技术规范"}-规则库.json`, "application/json;charset=utf-8")); links.append(exportButton); } holder.append(links);
+    if (!result) { if (job.status === "failed") holder.append(el("p", "notice", "本次未生成可用规范库。请根据错误处理后重新上传；已完成的其他版本仍可使用。")); return; }
+    const rules = list(result.rules); holder.append(stats([["规范规则", rules.length], ["条件规则", rules.filter(rule => list(rule.conditions).length).length], ["待确认规则", rules.filter(needsReview).length], ["解析提示", list(result.warnings).length]]));
+    if (meta.scope) holder.append(el("p", "detail-scope", meta.scope));
+    if (list(meta.excludedProcesses).length) holder.append(el("p", "rule-note", `排除范围：${list(meta.excludedProcesses).join("；")}`));
+    if (meta.priorityPolicy) holder.append(el("p", "rule-note", `优先关系：${meta.priorityPolicy}`));
+    const warn = warnings(result.warnings); if (warn) holder.append(warn); const cov = coverage(result.sourceCoverage, result.review); if (cov) holder.append(cov);
+    const panel = details(`查看完整规则库 · ${rules.length} 条`), input = el("input", "search-input"); input.type = "search"; input.placeholder = "搜索规则、适用条件、例外、原文…"; input.setAttribute("aria-label", "搜索规范规则");
+    const count = el("p", "panel-note"), rows = el("div", "rule-list");
+    const render = () => { const keyword = input.value.trim().toLocaleLowerCase(), filtered = rules.filter(rule => !keyword || JSON.stringify(rule).toLocaleLowerCase().includes(keyword)); rows.replaceChildren(); count.textContent = `显示 ${filtered.length} / ${rules.length} 条规则；具体是否适用由每张图纸分别判断。`; filtered.forEach(rule => rows.append(renderRule(rule, job.id))); if (!filtered.length) rows.append(el("p", "empty-inline", "没有匹配的规则。")); };
+    input.addEventListener("input", render); panel.body.append(input, count, rows); holder.append(panel.node); render();
+  }
+  async function selectSpec(id) {
+    state.specId = id; state.specJob = state.specifications.find(spec => spec.id === id) || null; renderSpecList(); $("spec-detail").replaceChildren(el("p", "placeholder", "正在读取规范详情…")); updateUrl(); schedulePoll();
+    const job = await fetchSpecJob(id); if (state.specId !== id) return;
+    state.specJob = job; updateSpecSummary(job); if (job.status === "completed" && !active(state.batch?.status)) $("spec-select").value = id; renderSpec(job); updateControls(); schedulePoll();
+  }
   function renderFiles() {
-    $("file-list").replaceChildren();
-    state.files.forEach((file, index) => {
-      const row = element("li", "file-item");
-      row.append(element("span", "file-icon", "PDF"));
-      const info = element("div", "file-info");
-      const name = element("span", "file-name", file.name);
-      name.title = file.name;
-      info.append(name, element("span", "file-size", readableSize(file.size)));
-      const remove = element("button", "icon-button file-remove", "×");
-      remove.type = "button";
-      remove.setAttribute("aria-label", `移除 ${file.name}`);
-      remove.addEventListener("click", () => { if (!state.busy) { state.files.splice(index, 1); renderFiles(); } });
-      row.append(info, remove);
-      $("file-list").append(row);
-    });
-    $("file-list").hidden = !state.files.length;
-    updateStart();
+    const holder = $("file-list"); holder.replaceChildren(); holder.hidden = !state.files.length;
+    state.files.forEach((file, index) => { const row = el("li", "file-item"), info = el("div", "file-info"), remove = el("button", "icon-button file-remove", "×"); info.append(el("span", "file-name", file.name), el("span", "file-size", file.size < 1048576 ? `${Math.max(1, Math.round(file.size / 1024))} KB` : `${(file.size / 1048576).toFixed(1)} MB`)); remove.type = "button"; remove.setAttribute("aria-label", `移除 ${file.name}`); remove.addEventListener("click", () => { if (!active(state.batch?.status)) { state.files.splice(index, 1); renderFiles(); } }); row.append(el("span", "file-icon", "PDF"), info, remove); holder.append(row); }); updateControls();
   }
-
   function addFiles(files) {
-    if (state.busy) return;
-    clearAlert();
-    const rejected = [];
-    const additions = [];
+    if (state.drawingSubmitting || active(state.batch?.status)) return;
+    const rejected = []; clearAlert();
     for (const file of files) {
-      if (!/\.pdf$/i.test(file.name)) { rejected.push(`${file.name}：仅支持 PDF 文件`); continue; }
-      if (file.size === 0) { rejected.push(`${file.name}：文件内容为空`); continue; }
-      if (state.files.some((item) => item.name === file.name && item.size === file.size) || additions.some((item) => item.name === file.name && item.size === file.size)) continue;
-      if (state.files.length + additions.length >= 10) { rejected.push("每次最多上传 10 份资料"); break; }
-      additions.push(file);
+      if (!/\.pdf$/i.test(file.name)) { rejected.push(`${file.name}：仅支持 PDF`); continue; }
+      if (!file.size) { rejected.push(`${file.name}：文件为空`); continue; }
+      if (state.files.some(item => item.name === file.name)) { rejected.push(`${file.name}：名称重复`); continue; }
+      if (state.files.length >= 20) { rejected.push("每批最多20份图纸"); break; }
+      state.files.push(file);
     }
-    state.files.push(...additions);
-    renderFiles();
-    if (rejected.length) alert(rejected.join("；"));
+    renderFiles(); if (rejected.length) showAlert(rejected.join("；"));
   }
-
-  function elapsed() {
-    const seconds = Math.max(0, Math.floor((Date.now() - state.startedAt) / 1000));
-    $("elapsed-time").textContent = `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  function renderRequirement(item, ctx) {
+    const card = el("article", "requirement-card"), top = el("div", "item-top"); top.append(el("span", "item-id", item.id), el("span", "item-category", item.category), el("span", "origin-tag", originNames[item.origin] || item.origin)); if (needsReview(item)) top.append(el("span", "status-tag warning", "待确认"));
+    card.append(top); if (item.scope) card.append(el("p", "item-scope", `适用：${item.scope}`)); card.append(el("p", "item-text", item.requirement));
+    const params = parameters(item.parameters); if (params) card.append(params); if (list(item.ruleIds).length) card.append(el("p", "rule-refs", `关联规范规则：${list(item.ruleIds).join("、")}`)); if (item.review_note) card.append(el("p", "review-note", item.review_note)); card.append(evidence(item.sources, ctx)); return card;
   }
-  function updateProgress(job) {
-    const isComplete = job.status === "completed";
-    const isFailed = job.status === "failed";
-    let current = stages.indexOf(job.status);
-    if (isComplete) current = stages.length;
-    if (current === -1) current = 0;
-    $("progress-title").textContent = isComplete ? "提取已完成" : isFailed ? "提取未完成" : "正在处理资料";
-    $("working-indicator").className = `working-indicator${isComplete ? " finished" : isFailed ? " failed" : ""}`;
-    $("progress-message").textContent = string(job.message, isComplete ? "结果已生成，请结合原文逐条复核。" : isFailed ? "请检查提示后重试。" : "任务执行中，请稍候…");
-    document.querySelectorAll(".progress-steps li").forEach((step, index) => {
-      step.classList.toggle("done", index < current);
-      step.classList.toggle("current", index === current && !isFailed);
-      step.querySelector("span").textContent = index < current ? "✓" : String(index + 1);
-      if (index === current && !isFailed) step.setAttribute("aria-current", "step"); else step.removeAttribute("aria-current");
+  function dispositionPanel(result, ctx) {
+    const rows = list(result.dispositions), panel = details(`规范规则适用处置 · ${rows.length} 条`), cov = result.ruleCoverage || {};
+    panel.body.append(stats([["适用", cov.applicable ?? rows.filter(x => x.status === "applicable").length], ["不适用", cov.notApplicable ?? rows.filter(x => x.status === "not_applicable").length], ["图纸覆盖", cov.overridden ?? rows.filter(x => x.status === "overridden").length], ["待确认", cov.needsConfirmation ?? rows.filter(x => x.status === "needs_confirmation").length]]));
+    panel.body.append(el("p", "panel-note", cov.note || `本表记录每条规范规则的处置原因。记录完整不代表判断一定正确，请结合图纸及条件复核。${cov.total != null ? ` 已记录 ${cov.decided ?? rows.length} / ${cov.total} 条。` : ""}`));
+    const controls = el("div", "disposition-controls"), search = el("input"), filter = el("select"), holder = el("div", "disposition-list"); search.type = "search"; search.placeholder = "搜索规则编号和处置原因…"; search.setAttribute("aria-label", "搜索规则处置"); filter.setAttribute("aria-label", "按规则处置筛选");
+    for (const [value, name] of [["", "全部处置"], ...Object.entries(dispositionNames)]) { const option = el("option", "", name); option.value = value; filter.append(option); }
+    const render = () => { holder.replaceChildren(); const keyword = search.value.trim().toLocaleLowerCase(); const filtered = rows.filter(row => (!filter.value || row.status === filter.value) && (!keyword || JSON.stringify(row).toLocaleLowerCase().includes(keyword))); for (const row of filtered) { const div = el("div", "disposition-row"), head = el("div", "item-top"); head.append(el("span", "item-id", row.ruleId), el("span", `disposition-status ${Object.hasOwn(dispositionNames, row.status) ? row.status : ""}`, dispositionNames[row.status] || row.status)); div.append(head, el("p", "", row.reason), evidence(row.evidence, ctx)); holder.append(div); } if (!filtered.length) holder.append(el("p", "empty-inline", "没有匹配的规则处置记录。")); };
+    search.addEventListener("input", render); filter.addEventListener("change", render); controls.append(search, filter); panel.body.append(controls, holder); render(); return panel.node;
+  }
+  function pendingIssues(result) {
+    const values = [...list(result.drawing?.uncertainties).map(str), ...list(result.dispositions).filter(row => row.status === "needs_confirmation").map(row => `${row.ruleId}：${row.reason}`), ...list(result.warnings).map(str)]; return [...new Set(values.filter(Boolean))];
+  }
+  function retryAction(drawing) {
+    if (!["failed", "completed"].includes(drawing.status)) return null;
+    const key = `${state.batchId}/${drawing.id}`, button = el("button", drawing.status === "failed" ? "primary-button" : "secondary-button", state.retryingDrawings.has(key) ? "正在提交…" : drawing.status === "failed" ? "重试此零件" : "重新核对本零件");
+    button.type = "button"; button.dataset.retryDrawing = drawing.id; button.dataset.retryBatch = state.batchId; button.disabled = state.retryingDrawings.has(key) || !state.configured;
+    button.addEventListener("click", () => retryDrawing(drawing.id, button)); return button;
+  }
+  function updateRetryButtons() {
+    document.querySelectorAll("[data-retry-drawing]").forEach(button => {
+      const drawing = list(state.batch?.drawings).find(item => item.id === button.dataset.retryDrawing), key = `${button.dataset.retryBatch}/${button.dataset.retryDrawing}`;
+      button.hidden = state.batchId !== button.dataset.retryBatch || !drawing || !["failed", "completed"].includes(drawing.status);
+      button.disabled = state.retryingDrawings.has(key) || !state.configured;
+      button.textContent = state.retryingDrawings.has(key) ? "正在提交…" : drawing?.status === "failed" ? "重试此零件" : "重新核对本零件";
     });
   }
-  function finishJob() {
-    state.busy = false;
-    clearInterval(state.timer);
-    clearTimeout(state.pollTimer);
-    elapsed();
-    updateStart();
-  }
-
-  async function pollJob() {
-    if (!state.jobId || !state.busy) return;
+  async function retryDrawing(drawingId, button) {
+    const batchId = state.batchId, key = `${batchId}/${drawingId}`, drawing = list(state.batch?.drawings).find(item => item.id === drawingId);
+    if (!batchId || !drawing || !["failed", "completed"].includes(drawing.status) || state.retryingDrawings.has(key) || !state.configured) return;
+    state.retryingDrawings.add(key); if (button) { button.disabled = true; button.textContent = "正在提交…"; } clearAlert();
+    let accepted = false;
     try {
-      const job = await fetchJson(`/api/jobs/${encodeURIComponent(state.jobId)}`);
-      state.pollErrors = 0;
-      updateProgress(job);
-      if (job.status === "completed") {
-        finishJob();
-        if (!job.result || !Array.isArray(job.result.requirements)) {
-          alert("任务已结束，但返回的结果格式不完整。请检查后端日志后重试。");
-          return;
+      await api(`/api/drawing-batches/${enc(batchId)}/drawings/${enc(drawingId)}/retry`, { method: "POST" }); accepted = true;
+      if (state.batchId === batchId) {
+        drawing.status = "queued"; drawing.message = "等待重新核对"; delete drawing.result; delete drawing.error;
+        state.batch.status = "queued"; state.batch.message = `重新核对 ${drawing.name || "本零件"}`; state.resultKey = ""; renderBatch(true);
+        await loadBatch(batchId, true);
+      }
+    } catch (error) {
+      showAlert(error.message);
+      // A request can be accepted before the connection fails. Read the original
+      // batch once before making a retry available; never resubmit automatically.
+      if (!accepted && state.batchId === batchId) {
+        try { await loadBatch(batchId, true); } catch { /* Keep the visible error. */ }
+      }
+    } finally {
+      state.retryingDrawings.delete(key);
+      if (state.batchId === batchId) { updateControls(); schedulePoll(); }
+    }
+  }
+  function renderDrawing(drawing) {
+    const holder = $("drawing-result"); holder.replaceChildren(); if (!drawing) return;
+    if (!drawing.result) { holder.append(statusBox(drawing)); holder.append(el("p", "notice", drawing.status === "failed" ? "这张图纸未生成可用结果。可沿用原图纸和规范版本，单独重试这个零件。其他已完成零件可分别查看。" : "每个零件独立处理，当前图纸的要求将在完成后显示。")); const retry = retryAction(drawing); if (retry) holder.append(retry); return; }
+    const result = drawing.result, profile = result.drawing || {}, ctx = context(result, drawing), items = list(result.requirements);
+    const card = el("div", "profile"); card.append(el("h3", "", profile.name || drawing.name));
+    const meta = el("div", "profile-meta"); for (const [label, value] of [["图号", profile.partNumber], ["版本", profile.revision], ["材料", profile.material], ["材料形态", profile.materialForm], ["工艺", profile.process], ["类别", profile.castingClass], ["气密", ({ required: "有要求", not_required: "明确无要求", unspecified: "未明确" })[profile.airtightness]], ["尺寸状态", ({ before_finish: "表面处理前", after_finish: "表面处理后", unspecified: "未明确" })[profile.dimensionState]]]) { if (value) { const entry = el("span", "", label); entry.append(el("strong", "", value)); meta.append(entry); } } card.append(meta);
+    const norm = result.specification || state.batch?.specification || {}; card.append(el("p", "", `使用规范：${uniqueText([norm.number || norm.metadata?.number, norm.version || norm.metadata?.version]).join(" · ") || "选定的规范版本"}；${stageNames[state.batch?.stage] || "保留全部阶段条件"}`));
+    if (result.summary) card.append(el("p", "", result.summary));
+    const links = el("div", "profile-links"); links.append(sourceLink("打开本零件图纸 ↗", `/api/drawing-batches/${enc(state.batchId)}/drawings/${enc(drawing.id)}/file`)); if (ctx.specId) links.append(sourceLink("打开关联规范 ↗", `/api/specifications/${enc(ctx.specId)}/file`)); const retry = retryAction(drawing); if (retry) links.append(retry); card.append(links);
+    if (list(profile.references).length) card.append(el("p", "", `图纸引用：${list(profile.references).join("；")}`));
+    if (list(profile.facts).length) { const facts = details(`图纸事实与依据 · ${profile.facts.length} 项`), grid = el("div", "profile-facts"); profile.facts.forEach(fact => { const item = el("div", "profile-fact"); item.append(el("strong", "", fact.name), el("p", "", fact.value), evidence(fact.sources, ctx)); grid.append(item); }); facts.body.append(grid); card.append(facts.node); }
+    holder.append(card, stats([["全部要求", items.length], ["制造要求", items.filter(item => !inspection(item)).length], ["检验要求", items.filter(inspection).length], ["待确认要求", items.filter(needsReview).length]]));
+    const cov = coverage(result.sourceCoverage, result.review); if (cov) holder.append(cov); holder.append(dispositionPanel(result, ctx));
+    const warn = warnings(result.warnings, "零件提示"); if (warn) holder.append(warn);
+    const toolbar = el("div", "result-toolbar"), tabs = el("div", "filter-tabs"), search = el("input", "result-search"); tabs.setAttribute("role", "group"); tabs.setAttribute("aria-label", "按要求类型筛选"); search.type = "search"; search.placeholder = "搜索要求、参数、原文…"; search.setAttribute("aria-label", "搜索零件要求"); search.value = state.search;
+    const pending = pendingIssues(result), pendingBox = el("div", "pending-list"); pendingBox.append(el("h3", "", `还需确认的条件与引用 · ${pending.length} 项`)); const pendingList = el("ul"); pending.forEach(issue => pendingList.append(el("li", "", issue))); pendingBox.append(pendingList);
+    const counts = { all: items.length, manufacturing: items.filter(item => !inspection(item)).length, inspection: items.filter(inspection).length, review: items.filter(needsReview).length + pending.length };
+    const rowHolder = el("div", "requirements-list"), caption = el("div", "visible-caption");
+    const render = () => { const keyword = state.search.trim().toLocaleLowerCase(), filtered = items.filter(item => (state.filter === "all" || state.filter === "manufacturing" && !inspection(item) || state.filter === "inspection" && inspection(item) || state.filter === "review" && needsReview(item)) && (!keyword || JSON.stringify(item).toLocaleLowerCase().includes(keyword))); rowHolder.replaceChildren(); filtered.forEach(item => rowHolder.append(renderRequirement(item, ctx))); if (!filtered.length) rowHolder.append(el("div", "no-results", "没有匹配的要求，请调整关键词或筛选类型。")); caption.replaceChildren(el("span", "", state.filter === "review" ? `显示 ${filtered.length} 条待确认要求，另有 ${pending.length} 项条件与引用提示` : `显示 ${filtered.length} / ${items.length} 条要求`), el("span", "", "要求 / 参数 / 原文依据")); pendingBox.hidden = state.filter !== "review" || !pending.length; tabs.querySelectorAll("button").forEach(button => { const chosen = button.dataset.filter === state.filter; button.classList.toggle("active", chosen); button.setAttribute("aria-pressed", str(chosen)); }); };
+    for (const [value, label] of [["all", "全部"], ["manufacturing", "制造要求"], ["inspection", "检验要求"], ["review", "待确认"]]) { const button = el("button", "filter-tab", label); button.type = "button"; button.dataset.filter = value; button.append(el("span", "", counts[value])); button.addEventListener("click", () => { state.filter = value; render(); }); tabs.append(button); }
+    search.addEventListener("input", () => { state.search = search.value; render(); }); toolbar.append(tabs, search); holder.append(toolbar, caption, pendingBox, rowHolder, el("p", "result-footnote", "模型输出用于核对制造与检验要求。请优先检查图纸标注、区域对应、条件适用和待确认项；本结果不直接判定产品合格。")); render();
+  }
+  function renderBatch(force = false) {
+    const batch = state.batch; $("batch-content").hidden = !batch; $("empty-state").hidden = Boolean(batch); if (!batch) return;
+    const drawings = list(batch.drawings); if (!drawings.some(item => item.id === state.drawingId)) state.drawingId = drawings.find(item => item.result)?.id || drawings[0]?.id || null;
+    const bar = $("batch-status"); bar.replaceChildren(badge(batch.status)); if (active(batch.status)) bar.append(el("span", "spinner")); const completed = drawings.filter(item => item.status === "completed").length, failed = drawings.filter(item => item.status === "failed").length; bar.append(el("span", "", `${batch.error || batch.message || statusNames[batch.status]} · ${completed} / ${drawings.length} 个零件完成${failed ? `，${failed} 个未完成` : ""}`));
+    const nav = $("drawing-list"); nav.replaceChildren(); drawings.forEach((drawing, index) => { const button = el("button", `drawing-item ${drawing.id === state.drawingId ? "selected" : ""}`); button.type = "button"; button.setAttribute("aria-pressed", str(drawing.id === state.drawingId)); button.append(el("strong", "", drawing.result?.drawing?.name || drawing.name || `零件 ${index + 1}`), el("small", "", drawing.result?.drawing?.partNumber || drawing.name || ""), badge(drawing.status)); button.addEventListener("click", () => { state.drawingId = drawing.id; state.filter = "all"; state.search = ""; state.resultKey = ""; renderBatch(true); updateUrl(); }); nav.append(button); });
+    const drawing = selectedDrawing(), key = drawing ? `${drawing.id}:${drawing.status}:${drawing.result ? "result" : ""}:${drawing.message || ""}:${drawing.error || ""}` : "empty";
+    if (force || key !== state.resultKey) { state.resultKey = key; renderDrawing(drawing); } updateControls(); updateUrl();
+  }
+  async function loadBatch(id, force = false) {
+    const batch = await api(`/api/drawing-batches/${enc(id)}`); if (state.batchId !== id) return; state.batch = batch; renderBatch(force); schedulePoll();
+  }
+  function schedulePoll() {
+    clearTimeout(state.pollTimer); if (state.specifications.some(spec => active(spec.status)) || active(state.specJob?.status) || active(state.batch?.status)) state.pollTimer = setTimeout(poll, state.pollErrors ? 5000 : 2000);
+  }
+  async function poll() {
+    if (state.pollRunning) return; state.pollRunning = true;
+    try {
+      const tasks = [];
+      if (state.specifications.some(spec => active(spec.status)) || active(state.specJob?.status)) tasks.push(refreshSpecs());
+      if (active(state.specJob?.status)) { const id = state.specId; tasks.push(fetchSpecJob(id).then(job => {
+        if (state.specId !== id) return;
+        const previous = state.specJob;
+        state.specJob = job; updateSpecSummary(job);
+        if (job.status !== previous.status || Boolean(job.result) !== Boolean(previous.result)) renderSpec(job);
+        else if (job.message !== previous.message || job.error !== previous.error) {
+          const current = $("spec-progress-status");
+          if (current) { const progress = statusBox(job); progress.id = "spec-progress-status"; current.replaceWith(progress); }
         }
-        state.result = job.result;
-        renderResult();
-        $("results-title").scrollIntoView({ behavior: "smooth", block: "start" });
-        return;
-      }
-      if (job.status === "failed") {
-        finishJob();
-        alert(string(job.error || job.message, "提取失败，请查看后端日志并重试。"));
-        return;
-      }
-    } catch (error) {
-      state.pollErrors += 1;
-      $("progress-message").textContent = `暂时无法获取任务状态，正在自动重连（${state.pollErrors}）… ${error.message}`;
-      if (state.pollErrors >= 12) {
-        finishJob();
-        alert("与服务的连接已中断，后台任务可能仍在运行。恢复服务后刷新页面，可继续查看最近任务。");
-        return;
-      }
-    }
-    state.pollTimer = setTimeout(pollJob, Math.min(1600 + state.pollErrors * 1800, 10000));
+      })); }
+      if (active(state.batch?.status)) tasks.push(loadBatch(state.batchId));
+      const outcomes = await Promise.allSettled(tasks), failure = outcomes.find(outcome => outcome.status === "rejected");
+      if (failure) throw failure.reason; state.pollErrors = 0;
+    } catch (error) { state.pollErrors++; if (state.pollErrors === 3) showAlert(`${error.message} 页面将继续尝试读取状态，请勿重复提交相同任务。`); }
+    finally { state.pollRunning = false; updateControls(); schedulePoll(); }
   }
-
-  async function startJob() {
-    if (state.busy || !state.files.length || !state.configured) return;
-    clearAlert();
-    state.busy = true;
-    state.result = null;
-    state.jobId = null;
-    state.startedAt = Date.now();
-    state.pollErrors = 0;
-    $("result-content").hidden = true;
-    $("empty-state").hidden = false;
-    $("export-actions").hidden = true;
-    $("progress-section").hidden = false;
-    updateStart();
-    updateProgress({ status: "queued", message: "正在上传文件并创建提取任务…" });
-    elapsed();
-    clearInterval(state.timer);
-    state.timer = setInterval(elapsed, 1000);
-    const form = new FormData();
-    state.files.forEach((file) => form.append("files", file));
-    form.append("model", MODEL);
-    try {
-      const job = await fetchJson("/api/jobs", { method: "POST", body: form }, 120000);
-      if (!job.id) throw new Error("后端未返回任务编号，请检查服务日志。");
-      state.jobId = String(job.id);
-      try { localStorage.setItem("honghe-latest-job", state.jobId); } catch (_) { /* Storage may be unavailable. */ }
-      updateJobUrl(state.jobId);
-      await pollJob();
-    } catch (error) {
-      finishJob();
-      updateProgress({ status: "failed", message: "未能创建任务，请检查服务与文件后重试。" });
-      alert(error.message);
-    }
-  }
-
-  function getRequirements() { return Array.isArray(state.result?.requirements) ? state.result.requirements : []; }
-  function needsReview(item) { return item.review_required === true || item.review_required === "true" || Boolean(item.review_note); }
-  function itemSources(item) { return Array.isArray(item.sources) ? item.sources : []; }
-  function itemParameters(item) { return Array.isArray(item.parameters) ? item.parameters : []; }
-  function renderSummary() {
-    const requirements = getRequirements();
-    const documents = Array.isArray(state.result.documents) ? state.result.documents : [];
-    const pages = documents.reduce((sum, doc) => sum + (Number(doc.pages) || 0), 0);
-    const stats = [
-      [requirements.length, "条", "工艺要求"],
-      [new Set(requirements.map((item) => string(item.category, "未分类"))).size, "类", "工艺分类"],
-      [requirements.filter(needsReview).length, "条", "需要人工复核"],
-      [documents.length || state.files.length, "份", pages ? `资料 · 共 ${pages} 页` : "来源资料"],
-    ];
-    $("result-summary").replaceChildren();
-    for (const [value, unit, label] of stats) {
-      const stat = element("div", "summary-stat");
-      const number = element("strong", "", value);
-      number.append(element("span", "", unit));
-      stat.append(number, element("label", "", label));
-      $("result-summary").append(stat);
-    }
-    $("all-count").textContent = String(requirements.length);
-    $("review-count").textContent = String(requirements.filter(needsReview).length);
-    $("results-caption").textContent = "提取完成 · 点击原文依据查看来源";
-    $("quality-notice").textContent = string(state.result.summary);
-    $("quality-notice").hidden = !state.result.summary;
-  }
-
-  function renderWarnings() {
-    const warnings = Array.isArray(state.result.warnings) ? state.result.warnings : [];
-    $("warnings-panel").hidden = !warnings.length;
-    $("warnings-label").textContent = `${warnings.length} 项提取提示，建议核对`;
-    $("warnings-list").replaceChildren();
-    warnings.forEach((warning) => $("warnings-list").append(element("li", "", string(warning))));
-    $("warnings-list").hidden = true;
-    $("warnings-toggle").setAttribute("aria-expanded", "false");
-  }
-
-  function renderCoverage() {
-    const coverage = state.result.sourceCoverage || state.result.quality?.sourceCoverage;
-    const available = coverage && typeof coverage === "object" && !Array.isArray(coverage);
-    $("coverage-panel").hidden = !available;
-    if (!available) return;
-    const count = (key) => {
-      const value = coverage[key];
-      if (value === undefined || value === null || value === "") return null;
-      const number = Number(value);
-      return Number.isFinite(number) && number >= 0 ? Math.floor(number) : null;
-    };
-    const totalPages = count("totalPages");
-    const visualPages = count("visualPages");
-    const failedPages = count("failedVisualPages");
-    const reviewed = count("reviewedRequirementCount");
-    const totalRequirements = count("totalRequirements");
-    const metrics = [
-      ["资料物理页数", totalPages, "页"],
-      ["已提交图像", visualPages, "页"],
-      ["图像覆盖缺口", failedPages, "页"],
-      ["提取批次", count("extractionBatches"), "批"],
-      ["模型复核批次", count("reviewBatches"), "批"],
-      ["已提交复核要求", reviewed !== null && totalRequirements !== null ? `${reviewed} / ${totalRequirements}` : reviewed, "条"],
-    ];
-    $("coverage-stats").replaceChildren();
-    for (const [label, value, unit] of metrics) {
-      const stat = element("div", "coverage-stat");
-      const number = element("strong", "", value === null ? "未提供" : value);
-      if (value !== null) number.append(element("span", "", unit));
-      stat.append(element("span", "coverage-stat-label", label), number);
-      $("coverage-stats").append(stat);
-    }
-    $("coverage-summary").textContent = totalPages !== null ? `共 ${totalPages} 页${reviewed !== null ? ` · 提交复核 ${reviewed} 条` : ""}` : "查看分析与复核记录";
-    const notices = [];
-    if (Array.isArray(coverage.numericReviewFindings) && coverage.numericReviewFindings.length) notices.push(`${coverage.numericReviewFindings.length} 页存在疑似未覆盖的图纸数值，详见提取提示；这不是自动判错。`);
-    if (failedPages > 0) notices.push(`${failedPages} 页图像未完整提交，相关图形、标注或扫描内容可能遗漏，请核对原始 PDF。`);
-    if (reviewed !== null && totalRequirements !== null && reviewed < totalRequirements) notices.push(`${totalRequirements - reviewed} 条要求未再次单独提交复核（可能为查漏新增项），请重点核对。`);
-    $("coverage-warning").textContent = notices.join(" ");
-    $("coverage-warning").hidden = !notices.length;
-    $("coverage-panel").open = notices.length > 0;
-    $("coverage-panel").classList.toggle("has-warning", notices.length > 0);
-  }
-
-  function sourceDocumentIndex(file) {
-    const docs = Array.isArray(state.result?.documents) ? state.result.documents : [];
-    return docs.findIndex((doc) => string(doc.name) === file || string(doc.filename) === file);
-  }
-
-  function renderRequirement(item, index) {
-    const card = element("article", "requirement-card");
-    const top = element("div", "requirement-top");
-    top.append(element("span", "requirement-number", string(item.id, `REQ-${String(index + 1).padStart(3, "0")}`)), element("span", "tag category-tag", string(item.category, "未分类")));
-    if (needsReview(item)) top.append(element("span", "tag review-tag", "待复核"));
-    if (item.scope) {
-      const scope = element("span", "scope-label", `适用：${string(item.scope)}`);
-      scope.title = string(item.scope);
-      top.append(scope);
-    }
-    card.append(top, element("p", "requirement-text", string(item.requirement, "（要求内容为空，请核对结果）")));
-    const parameters = itemParameters(item);
-    if (parameters.length) {
-      const list = element("ul", "parameter-list");
-      parameters.forEach((parameter) => {
-        const chip = element("li", "parameter-chip");
-        chip.append(element("span", "parameter-name", string(parameter.name, "参数")), element("span", "parameter-value", `${string(parameter.value)}${parameter.unit ? ` ${string(parameter.unit)}` : ""}`));
-        list.append(chip);
-      });
-      card.append(list);
-    }
-    if (item.review_note) {
-      const note = element("p", "review-note");
-      note.append(element("span", "", "!"), element("span", "", string(item.review_note)));
-      card.append(note);
-    }
-    const sources = itemSources(item);
-    const details = element("details", "evidence-details");
-    const summary = element("summary", "", "原文依据");
-    summary.append(element("span", "", `${sources.length} 处来源`));
-    details.append(summary);
-    if (!sources.length) details.append(element("div", "source-missing", "未提供可追溯的原文来源，请人工复核。"));
-    else {
-      const sourceList = element("div", "evidence-sources");
-      sources.forEach((source) => {
-        const sourceItem = element("div", "source-item");
-        const header = element("div", "source-header");
-        const file = string(source.file, "来源未标明");
-        const documentIndex = sourceDocumentIndex(file);
-        let sourceName;
-        if (documentIndex >= 0 && state.jobId) {
-          sourceName = element("a", "source-file link", file);
-          const page = Number(source.page);
-          sourceName.href = `/api/jobs/${encodeURIComponent(state.jobId)}/files/${documentIndex}${Number.isInteger(page) && page > 0 ? `#page=${page}` : ""}`;
-          sourceName.target = "_blank";
-          sourceName.rel = "noopener";
-          sourceName.title = "在新窗口中查看原始 PDF";
-        } else sourceName = element("span", "source-file", file);
-        header.append(sourceName, element("span", "page-tag", source.page !== undefined && source.page !== null ? `第 ${string(source.page)} 页` : "页码待核对"));
-        sourceItem.append(header, element("blockquote", "", string(source.quote, "（无原文摘录，请核对原始资料）")));
-        if (source.section) sourceItem.append(element("div", "source-section", `条款：${string(source.section)}`));
-        sourceList.append(sourceItem);
-      });
-      details.append(sourceList);
-    }
-    card.append(details);
-    return card;
-  }
-
-  function renderList() {
-    const requirements = getRequirements();
-    const category = $("category-filter").value;
-    const search = $("search-input").value.trim().toLocaleLowerCase();
-    const visible = requirements.map((item, index) => ({ item, index })).filter(({ item }) => {
-      if (state.filter === "review" && !needsReview(item)) return false;
-      if (category && string(item.category, "未分类") !== category) return false;
-      if (search) {
-        const haystack = [item.requirement, item.category, item.scope, item.review_note, ...itemParameters(item).flatMap((p) => [p.name, p.value, p.unit]), ...itemSources(item).flatMap((s) => [s.file, s.quote, s.section])].map((value) => string(value)).join(" ").toLocaleLowerCase();
-        if (!haystack.includes(search)) return false;
-      }
-      return true;
-    });
-    $("requirements-list").replaceChildren(...visible.map(({ item, index }) => renderRequirement(item, index)));
-    $("visible-count").textContent = `显示 ${visible.length} / ${requirements.length} 条要求`;
-    $("no-results").hidden = visible.length > 0;
-    if (!requirements.length) {
-      $("no-results").querySelector("strong").textContent = "资料中未提取到工艺要求";
-      $("no-results").querySelector("p").textContent = "请核对原始资料与上方提取提示，必要时重新运行。";
-      $("reset-filters").hidden = true;
-    } else {
-      $("no-results").querySelector("strong").textContent = "未找到匹配的要求";
-      $("no-results").querySelector("p").textContent = "试试其他关键词，或调整筛选条件。";
-      $("reset-filters").hidden = false;
-    }
-  }
-  function setFilter(value) {
-    state.filter = value;
-    document.querySelectorAll(".filter-tab").forEach((button) => {
-      const active = button.dataset.filter === value;
-      button.classList.toggle("active", active);
-      button.setAttribute("aria-pressed", String(active));
-    });
-    renderList();
-  }
-  function resetFilters() { $("category-filter").value = ""; $("search-input").value = ""; setFilter("all"); }
-  function renderResult() {
-    $("empty-state").hidden = true;
-    $("result-content").hidden = false;
-    $("export-actions").hidden = false;
-    renderSummary();
-    renderCoverage();
-    renderWarnings();
-    $("category-filter").replaceChildren();
-    const all = element("option", "", "全部类别");
-    all.value = "";
-    $("category-filter").append(all);
-    for (const category of [...new Set(getRequirements().map((item) => string(item.category, "未分类")))]) {
-      const option = element("option", "", category);
-      option.value = category;
-      $("category-filter").append(option);
-    }
-    resetFilters();
-  }
-
-  function download(content, type, extension) {
-    const date = new Date();
-    const stamp = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}-${String(date.getHours()).padStart(2, "0")}${String(date.getMinutes()).padStart(2, "0")}`;
-    const blob = new Blob([content], { type });
-    const url = URL.createObjectURL(blob);
-    const link = element("a");
-    link.href = url;
-    link.download = `工艺要求提取-${stamp}.${extension}`;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-  function csvCell(value) {
-    let text = string(value);
-    // Prevent spreadsheet programs from interpreting source text as formulas.
-    if (/^[\s]*[=+@-]/.test(text)) text = `'${text}`;
-    return `"${text.replace(/"/g, '""')}"`;
+  function download(content, filename, mime) {
+    const blob = new Blob([content], { type: mime }), url = URL.createObjectURL(blob), a = document.createElement("a"); a.href = url; a.download = filename.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_"); a.hidden = true; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   function exportCsv() {
-    if (!state.result) return;
-    const rows = [["编号", "工艺类别", "工艺要求", "关键参数", "适用范围", "待复核", "复核说明", "来源文件", "来源页码", "原文摘录", "条款"]];
-    getRequirements().forEach((item, index) => {
-      const sources = itemSources(item);
-      rows.push([string(item.id, `REQ-${String(index + 1).padStart(3, "0")}`), item.category, item.requirement, itemParameters(item).map((p) => `${string(p.name)}：${string(p.value)}${p.unit ? ` ${string(p.unit)}` : ""}`).join("；"), item.scope, needsReview(item) ? "是" : "否", item.review_note, sources.map((s) => string(s.file)).join("\n"), sources.map((s) => string(s.page)).join("\n"), sources.map((s) => string(s.quote)).join("\n\n"), sources.map((s) => string(s.section)).join("\n")]);
-    });
-    download("\uFEFF" + rows.map((row) => row.map(csvCell).join(",")).join("\r\n"), "text/csv;charset=utf-8", "csv");
+    const result = currentResult(); if (!result) return;
+    const quote = value => { let text = str(value); if (/^[\s]*[=+\-@]/.test(text)) text = "'" + text; return `"${text.replace(/"/g, '""')}"`; };
+    const rows = [["零件图号", "零件名称", "编号", "类别", "来源类型", "要求", "适用范围", "参数", "规范规则", "待确认", "确认说明", "原文依据"], ...list(result.requirements).map(item => [result.drawing?.partNumber, result.drawing?.name, item.id, item.category, originNames[item.origin] || item.origin, item.requirement, item.scope, list(item.parameters).map(p => `${p.name}：${p.value} ${p.unit || ""}`).join("；"), list(item.ruleIds).join("；"), needsReview(item) ? "是" : "否", item.review_note, list(item.sources).map(source => `${source.file} 第${source.page}页 ${source.section || ""}：${source.quote}`).join("\n")])];
+    download("\ufeff" + rows.map(row => row.map(quote).join(",")).join("\r\n"), `${result.drawing?.partNumber || "零件"}-工艺要求.csv`, "text/csv;charset=utf-8");
   }
 
-  function updateJobUrl(id) {
-    try {
-      const url = new URL(location.href);
-      url.searchParams.set("job", id);
-      history.replaceState(null, "", url);
-    } catch (_) { /* Job restoration remains available without URL updates. */ }
+  $("spec-file").addEventListener("change", updateControls);
+  $("spec-form").addEventListener("submit", async event => {
+    event.preventDefault(); if (state.specSubmitting || !state.configured) return; const file = $("spec-file").files[0]; if (!file || !/\.pdf$/i.test(file.name) || !file.size) { showAlert("请选择非空的 PDF 技术规范。"); return; }
+    clearAlert(); state.specSubmitting = true; updateControls();
+    try { const form = new FormData(); form.append("file", file); if ($("spec-label").value.trim()) form.append("label", $("spec-label").value.trim()); const data = await api("/api/specifications", { method: "POST", body: form }); $("spec-file").value = ""; $("spec-label").value = ""; await refreshSpecs(); await selectSpec(data.id); }
+    catch (error) { showAlert(error.message); } finally { state.specSubmitting = false; updateControls(); }
+  });
+  $("spec-select").addEventListener("change", () => { updateControls(); if ($("spec-select").value && $("spec-select").value !== state.specId) selectSpec($("spec-select").value).catch(error => showAlert(error.message)); });
+  $("drawing-files").addEventListener("change", event => { addFiles(Array.from(event.target.files)); event.target.value = ""; });
+  $("clear-files").addEventListener("click", () => { state.files = []; renderFiles(); });
+  const dropzone = $("dropzone"); dropzone.addEventListener("keydown", event => { if (["Enter", " "].includes(event.key) && !$("drawing-files").disabled) { event.preventDefault(); $("drawing-files").click(); } });
+  for (const type of ["dragenter", "dragover"]) dropzone.addEventListener(type, event => { event.preventDefault(); if (!$("drawing-files").disabled) dropzone.classList.add("dragover"); });
+  for (const type of ["dragleave", "drop"]) dropzone.addEventListener(type, event => { event.preventDefault(); dropzone.classList.remove("dragover"); if (type === "drop") addFiles(Array.from(event.dataTransfer.files)); });
+  $("drawing-form").addEventListener("submit", async event => {
+    event.preventDefault(); if ($("start-drawings").disabled) return; state.drawingSubmitting = true; clearAlert(); updateControls();
+    try { const form = new FormData(); form.append("specificationId", $("spec-select").value); form.append("stage", $("production-stage").value); state.files.forEach(file => form.append("files", file)); const data = await api("/api/drawing-batches", { method: "POST", body: form }); state.batchId = data.id; state.batch = { id: data.id, status: "queued", message: "任务已创建，正在读取状态", specificationId: $("spec-select").value, stage: $("production-stage").value, drawings: [] }; state.drawingId = null; state.resultKey = ""; state.filter = "all"; state.search = ""; state.files = []; renderFiles(); renderBatch(true); await loadBatch(data.id, true); $("results-heading").scrollIntoView({ behavior: "smooth", block: "start" }); }
+    catch (error) { showAlert(error.message); } finally { state.drawingSubmitting = false; updateControls(); schedulePoll(); }
+  });
+  $("refresh-health").addEventListener("click", () => { health(); schedulePoll(); });
+  $("refresh-specs").addEventListener("click", async () => { try { await refreshSpecs(); if (state.specId) await selectSpec(state.specId); } catch (error) { showAlert(error.message); } });
+  $("dismiss-alert").addEventListener("click", clearAlert); $("export-csv").addEventListener("click", exportCsv);
+  $("export-json").addEventListener("click", () => { const result = currentResult(); if (result) download(JSON.stringify(result, null, 2), `${result.drawing?.partNumber || "零件"}-工艺要求.json`, "application/json;charset=utf-8"); });
+  const dialog = $("guide-dialog"); $("guide-button").addEventListener("click", () => dialog.showModal()); $("close-guide").addEventListener("click", () => dialog.close()); $("guide-done").addEventListener("click", () => dialog.close()); dialog.addEventListener("click", event => { if (event.target === dialog) { const bounds = dialog.getBoundingClientRect(); if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close(); } });
+  window.addEventListener("beforeunload", () => clearTimeout(state.pollTimer));
+  async function initialize() {
+    const params = new URLSearchParams(location.search); state.specId = params.get("spec"); state.batchId = params.get("batch"); state.drawingId = params.get("drawing");
+    if (params.has("job")) showAlert("当前页面已升级为两阶段工作台。历史任务仍保留在后端，可通过原任务 API 读取；请选择规范库后创建逐零件任务。");
+    await health();
+    try { await refreshSpecs(); if (!state.specId) state.specId = state.specifications.find(spec => spec.status === "completed")?.id || state.specifications[0]?.id || null; const tasks = []; if (state.specId) tasks.push(selectSpec(state.specId)); if (state.batchId) tasks.push(loadBatch(state.batchId, true)); const results = await Promise.allSettled(tasks); for (const result of results) if (result.status === "rejected") showAlert(result.reason.message); }
+    catch (error) { showAlert(error.message); $("spec-list").replaceChildren(el("p", "placeholder", "规范库读取失败，请检查服务后刷新。")); }
+    updateControls(); schedulePoll();
   }
-
-  async function restoreLatestJob() {
-    let id;
-    const requestedId = new URLSearchParams(location.search).get("job");
-    if (requestedId) id = requestedId;
-    else { try { id = localStorage.getItem("honghe-latest-job"); } catch (_) { return; } }
-    if (!id) return;
-    try {
-      const job = await fetchJson(`/api/jobs/${encodeURIComponent(id)}`);
-      if (state.busy || state.files.length) return;
-      state.jobId = id;
-      updateJobUrl(id);
-      if (job.status === "completed" && job.result && Array.isArray(job.result.requirements)) {
-        state.result = job.result;
-        renderResult();
-      } else if (job.status === "failed" && requestedId) {
-        $("progress-section").hidden = false;
-        updateProgress(job);
-        alert(string(job.error || job.message, "此任务提取失败，请检查资料后重新运行。"));
-      } else if (stages.includes(job.status)) {
-        state.busy = true;
-        state.startedAt = Date.parse(job.createdAt) || Date.now();
-        $("progress-section").hidden = false;
-        updateProgress(job);
-        updateStart();
-        elapsed();
-        state.timer = setInterval(elapsed, 1000);
-        pollJob();
-      }
-    } catch (error) { if (requestedId) alert(`无法打开此提取任务：${error.message}`); }
-  }
-
-  $("file-input").addEventListener("change", (event) => { addFiles(event.target.files); event.target.value = ""; });
-  $("dropzone").addEventListener("keydown", (event) => { if ((event.key === "Enter" || event.key === " ") && !state.busy) { event.preventDefault(); $("file-input").click(); } });
-  for (const eventName of ["dragenter", "dragover"]) $("dropzone").addEventListener(eventName, (event) => { event.preventDefault(); if (!state.busy) $("dropzone").classList.add("drag-over"); });
-  for (const eventName of ["dragleave", "drop"]) $("dropzone").addEventListener(eventName, (event) => { event.preventDefault(); $("dropzone").classList.remove("drag-over"); });
-  $("dropzone").addEventListener("drop", (event) => { if (event.dataTransfer?.files) addFiles(event.dataTransfer.files); });
-  window.addEventListener("dragover", (event) => event.preventDefault());
-  window.addEventListener("drop", (event) => event.preventDefault());
-  $("clear-files").addEventListener("click", () => { if (!state.busy) { state.files = []; renderFiles(); clearAlert(); } });
-  $("start-button").addEventListener("click", startJob);
-  $("refresh-health").addEventListener("click", checkHealth);
-  $("dismiss-alert").addEventListener("click", clearAlert);
-  $("category-filter").addEventListener("change", renderList);
-  $("search-input").addEventListener("input", renderList);
-  document.querySelectorAll(".filter-tab").forEach((button) => button.addEventListener("click", () => setFilter(button.dataset.filter)));
-  $("reset-filters").addEventListener("click", resetFilters);
-  $("warnings-toggle").addEventListener("click", () => { const expanded = $("warnings-toggle").getAttribute("aria-expanded") === "true"; $("warnings-toggle").setAttribute("aria-expanded", String(!expanded)); $("warnings-list").hidden = expanded; });
-  $("export-json").addEventListener("click", () => { if (state.result) download(JSON.stringify(state.result, null, 2), "application/json;charset=utf-8", "json"); });
-  $("export-csv").addEventListener("click", exportCsv);
-  $("guide-button").addEventListener("click", () => $("guide-dialog").showModal());
-  $("close-guide").addEventListener("click", () => $("guide-dialog").close());
-  $("guide-done").addEventListener("click", () => $("guide-dialog").close());
-  $("guide-dialog").addEventListener("click", (event) => { if (event.target === $("guide-dialog")) { const rect = $("guide-dialog").getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $("guide-dialog").close(); } });
-  window.addEventListener("beforeunload", (event) => { if (state.busy && !state.jobId) { event.preventDefault(); event.returnValue = ""; } });
-  checkHealth();
-  restoreLatestJob();
+  initialize();
 })();

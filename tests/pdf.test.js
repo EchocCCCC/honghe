@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { prepareDocuments, poppler } from '../server/pdf.js';
+import { prepareDocuments, poppler, augmentTableEvidence } from '../server/pdf.js';
 import { runProcess } from '../server/process.js';
+import { appendTableStructure, python } from '../server/table-structure.js';
 
 let popplerAvailable = true;
 try { await Promise.all(Object.values(poppler).map(command => runProcess(command, ['-v'], { timeout: 15000 }))); }
@@ -36,6 +37,7 @@ async function fixture(name, pages) {
     const lines = page.text?.match(/.{1,32}/g) || [];
     let stream = lines.length ? `BT /F1 8 Tf 15 ${(page.height || 400) - 20} Td ${lines.map((line, index) => `${index ? '0 -12 Td ' : ''}(${line.replace(/[()\\]/g, '\\$&')}) Tj`).join(' ')} ET\n` : '';
     if (page.visual) stream += 'q 140 0 0 80 30 70 cm BI /W 2 /H 2 /CS /RGB /BPC 8 /F /AHx ID FF000000FF000000FF000000> EI Q\n';
+    if (page.extraStream) stream += page.extraStream;
     const contentId = objects.length + 1;
     objects.push(`<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}endstream`);
     objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${page.width || 240} ${page.height || 400}] /Rotate ${page.rotate || 0} /Resources << /Font << /F1 3 0 R >> >> /Contents ${contentId} 0 R >>`);
@@ -95,6 +97,43 @@ test('attachments are not silently capped at twelve pages', options, async () =>
   assert.ok(result.pages.every(page => page.imagePaths.length === 1));
   assert.deepEqual(result.coverage.missingImagePages, []);
   assert.equal(result.warnings.some(warning => /12.*上限|未附该页/.test(warning)), false);
+});
+
+test('drawing detail mode supplies genuinely higher-resolution crops for portrait scans too', options, async () => {
+  const file = await fixture('portrait-drawing.pdf', [{ text: 'Detailed drawing notes', visual: true }]);
+  const result = await prepareDocuments([file], path.join(temporaryRoot, 'detail'), { detailMode: true });
+  assert.equal(result.pages[0].landscape, false);
+  assert.equal(result.images.length, 5);
+  const overview = await fs.readFile(result.images[0]);
+  const crop = await fs.readFile(result.images[1]);
+  assert.ok(crop.readUInt32BE(16) > overview.readUInt32BE(16) / 2 * 1.8);
+  assert.equal(result.documents[0].needsVisualReview.length, 0);
+});
+test('table audit augments image-only pages without dropping other physical pages', options, async () => {
+  const file = await fixture('table-audit.pdf', [{ text: 'normal source page' }, { visual: true }]);
+  const result = await prepareDocuments([file], path.join(temporaryRoot, 'table-audit-base'));
+  await augmentTableEvidence(result, [file], path.join(temporaryRoot, 'table-audit-detail'));
+  assert.deepEqual(result.pages.map(p => p.page), [1, 2]);
+  assert.equal(result.pages[0].imagePaths.length, 1); assert.equal(result.pages[1].imagePaths.length, 5);
+  assert.equal(result.images.length, 6); assert.equal(result.coverage.totalImages, 6);
+  assert.match(await fs.readFile(result.sourcePath, 'utf8'), /VISUAL_TABLE_EVIDENCE_DATA/);
+});
+let tableParserAvailable = true;
+try { await runProcess(python(), ['-X', 'utf8', '-c', 'import pdfplumber'], { timeout: 20000 }); } catch { tableParserAvailable = false; }
+test('vector grid expands only a physically merged cell, leaving a neighboring empty cell empty', { skip: !popplerAvailable || !tableParserAvailable }, async () => {
+  const stream = '0.5 w 10 20 300 160 re S 90 20 m 90 180 l S 190 20 m 190 180 l S 10 140 m 310 140 l S 10 100 m 190 100 l S 10 60 m 310 60 l S\n' +
+    'BT /F1 10 Tf 20 155 Td (condition) Tj ET BT /F1 10 Tf 110 155 Td (note) Tj ET BT /F1 10 Tf 210 155 Td (value) Tj ET\n' +
+    'BT /F1 10 Tf 20 115 Td (10) Tj ET BT /F1 10 Tf 20 75 Td (20) Tj ET BT /F1 10 Tf 20 35 Td (30) Tj ET\n' +
+    'BT /F1 10 Tf 110 115 Td (A) Tj ET BT /F1 10 Tf 110 35 Td (B) Tj ET BT /F1 10 Tf 210 95 Td (7) Tj ET BT /F1 10 Tf 210 35 Td (8) Tj ET\n';
+  const file = await fixture('merged-vector-table.pdf', [{ width: 340, height: 220, extraStream: stream }]);
+  const directory = path.join(temporaryRoot, 'vector-table');
+  const prepared = await prepareDocuments([file], directory, { renderImages: false });
+  const payload = await appendTableStructure(prepared, file, directory);
+  const rows = payload.pages[0].tables[0].expandedRows;
+  assert.deepEqual(rows.slice(1).map(row => row.values), [['10', 'A', '7'], ['20', '', '7'], ['30', 'B', '8']]);
+  assert.equal(rows[1].cellRefs[2], rows[2].cellRefs[2]);
+  assert.notEqual(rows[1].cellRefs[1], rows[2].cellRefs[1]);
+  assert.match(await fs.readFile(prepared.sourcePath, 'utf8'), /PDF_VECTOR_TABLE_STRUCTURE_DATA/);
 });
 
 test('render failures remain explicit coverage gaps and force review', options, async () => {

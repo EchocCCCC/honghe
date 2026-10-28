@@ -1,0 +1,4 @@
+interface:
+  display_name: "图纸工艺要求匹配"
+  short_description: "结合选定规范规则与单零件图纸，输出制造、检验和待确认要求及适用依据"
+  default_prompt: "使用 $drawing-requirements-matcher 结合规范规则库和当前图纸，生成本零件要求清单。"

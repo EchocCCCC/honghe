@@ -6,7 +6,7 @@ const target = process.argv[2];
 if (!target) throw new Error('请提供新的绝对打包目录');
 const directory = path.resolve(target);
 await fs.mkdir(directory, { recursive: false });
-const excluded = new Set(['node_modules', '.git', '.env', 'runtime', 'fixtures', 'runs', 'test-results', 'playwright-report', '__pycache__']);
+const excluded = new Set(['node_modules', '.git', '.env', 'runtime', 'fixtures', 'runs', 'work', 'test-results', 'playwright-report', '__pycache__']);
 await fs.cp(ROOT, path.join(directory, 'honghe'), {
   recursive: true,
   filter: src => !path.relative(ROOT, src).split(path.sep).some(part => excluded.has(part) || (part.startsWith('.env.') && part !== '.env.example')),

@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { ROOT, RUNTIME, MODELS, MODEL_NAME, config, safeError } from './config.js';
 import { prepareDocuments } from './pdf.js';
 import { runExtractionPipeline } from './pipeline.js';
+import { createTwoStageRouter } from './two-stage-routes.js';
 
 await fs.mkdir(path.join(RUNTIME, 'uploads'), { recursive: true });
 await fs.mkdir(path.join(RUNTIME, 'jobs'), { recursive: true });
@@ -29,6 +30,7 @@ app.use((req, res, next) => {
 });
 app.use(express.static(path.join(ROOT, 'public')));
 app.get('/api/health', (_req, res) => res.json({ ok: true, configured: Boolean(config.apiKey), model: config.model, modelName: MODEL_NAME, models: MODELS, piVersion: '1.4.0' }));
+app.use('/api', createTwoStageRouter());
 
 async function persist(job) {
   job.updatedAt = new Date().toISOString();
