@@ -176,14 +176,14 @@ test('portable Python drawing CLI makes genuine portrait detail images with only
   assert.equal(prepared.pages.length, 1);
   assert.equal(prepared.pages[0].landscape, false);
   assert.equal(prepared.documents[0].name, '零件图纸.pdf');
-  assert.equal(prepared.images.length, 5);
+  assert.equal(prepared.images.length, 6);
   const overview = await fs.readFile(prepared.images[0]), crop = await fs.readFile(prepared.images[1]);
   assert.equal(overview.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
   assert.ok(crop.readUInt32BE(16) > overview.readUInt32BE(16) / 2 * 1.8, 'a crop must be rerendered above overview resolution');
   assert.deepEqual(prepared.documents[0].needsVisualReview, []);
   const coverage = await readJson(path.join(output, 'coverage.json'));
-  assert.equal(coverage.totalImages, 5);
-  assert.equal(summary.coverage.totalImages, 5);
+  assert.equal(coverage.totalImages, 6);
+  assert.equal(summary.coverage.totalImages, 6);
   assert.deepEqual(coverage.pages[0].images, prepared.images.map(image => path.basename(image)));
   await assert.rejects(fs.access(path.join(output, 'table-structure.json')), { code: 'ENOENT' });
 });

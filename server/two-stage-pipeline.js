@@ -13,8 +13,8 @@ import { parseContract, specificationSchema, specificationPatchSchema, verifyReq
 
 export const SPEC_SKILL = path.join(ROOT, 'skills/specification-rule-parser');
 export const DRAWING_SKILL = path.join(ROOT, 'skills/drawing-requirements-matcher');
-export const PIPELINE_VERSION = 'two-stage-v8-contract-retry';
-export const DRAWING_PIPELINE_VERSION = 'two-stage-v11-contract-retry';
+export const PIPELINE_VERSION = 'two-stage-v9-smaller-audit';
+export const DRAWING_PIPELINE_VERSION = 'two-stage-v12-margin-evidence';
 const json = (file, value) => fs.writeFile(file, JSON.stringify(value, null, 2));
 export const digest = value => createHash('sha256').update(value).digest('hex');
 export async function invokeWithContractRetry({ invoke = runPi, invocation, validate }) {
@@ -132,7 +132,7 @@ export async function buildSpecification({ file, directory, skill = SPEC_SKILL, 
   onProgress('auditing', '为规范表格生成高分辨率证据，逐格核查合并范围');
   await augmentTableEvidence(prepared, [file], path.join(directory, 'table-details'));
   await json(path.join(directory, 'prepared.json'), prepared);
-  const auditBatches = planPageBatches(prepared.pages, { maxImages: 12, maxPages: 4 });
+  const auditBatches = planPageBatches(prepared.pages, { maxImages: 12, maxPages: 2 });
   await json(path.join(directory, 'audit-plan.json'), auditBatches);
   const reviews = [];
   for (const batch of auditBatches) {

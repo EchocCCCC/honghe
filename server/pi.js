@@ -121,7 +121,13 @@ export async function runPi({ directory, sourcePath, images = [], model = config
           const partial = (final.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
           await fs.writeFile(path.join(directory, 'incomplete-output.txt'), partial);
         }
-        const parsed = parseAssistantEvents(events);
+        let parsed;
+        try { parsed = parseAssistantEvents(events); }
+        catch (error) {
+          const raw = (final?.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+          await fs.writeFile(path.join(directory, 'invalid-output.txt'), raw);
+          throw error;
+        }
         const metadata = { model, modelLabel: MODEL_NAME, documentedModelVersion: MODEL_VERSION, versionNote: '版本依据2026-10-28官方映射；API别名并非不可变快照', providerReportedModel: parsed.model, elapsedMs: Date.now() - started, protocolEvents: lines, usage: parsed.usage, stopReason: parsed.stopReason, piVersion: '1.4.0', skill: loading.name, skillSha256: skillHash, skillBundleSha256: loading.bundleSha256, skillMode: loading.mode, skillLoading: loading, attachedImages: images.length };
         await fs.writeFile(path.join(directory, 'model-result.json'), JSON.stringify(parsed.result, null, 2));
         await fs.writeFile(path.join(directory, 'run-metadata.json'), JSON.stringify(metadata, null, 2));

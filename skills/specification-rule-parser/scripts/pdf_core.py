@@ -207,6 +207,20 @@ def prepare_documents(files, directory, *, render_images=True, detail_mode=False
                             if page not in doc["needsVisualReview"]:
                                 doc["needsVisualReview"].append(page)
                             warnings.append(f'{file["name"]} 第{page}页：{POSITIONS[tile]}局部图生成失败，请核对原图细节。')
+                    if detail_mode:
+                        target = str(prefix) + "-focus-left-lower"
+                        y = max(0, half_height - overlap)
+                        try:
+                            image, _ = _render(file, page, target, scale=scale,
+                                               crop=(0, y, min(math.ceil(crop_width / 4) + overlap, crop_width),
+                                                     crop_height - y))
+                            descriptor["imagePaths"].append(image)
+                            images.append(image)
+                            all_text += f"[同页边栏聚焦图：{Path(target).name}.png，位置左下边栏；仅补充放大证据，不预判字段排列；来源仍为物理页{page}。]\n"
+                        except Exception:
+                            if page not in doc["needsVisualReview"]:
+                                doc["needsVisualReview"].append(page)
+                            warnings.append(f'{file["name"]} 第{page}页：左下边栏聚焦图生成失败，请核对原图对应字段。')
             except Exception:
                 if page not in doc["needsVisualReview"]:
                     doc["needsVisualReview"].append(page)

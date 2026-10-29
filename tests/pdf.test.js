@@ -104,11 +104,72 @@ test('drawing detail mode supplies genuinely higher-resolution crops for portrai
   const file = await fixture('portrait-drawing.pdf', [{ text: 'Detailed drawing notes', visual: true }]);
   const result = await prepareDocuments([file], path.join(temporaryRoot, 'detail'), { detailMode: true });
   assert.equal(result.pages[0].landscape, false);
-  assert.equal(result.images.length, 5);
+  assert.equal(result.images.length, 6);
   const overview = await fs.readFile(result.images[0]);
   const crop = await fs.readFile(result.images[1]);
   assert.ok(crop.readUInt32BE(16) > overview.readUInt32BE(16) / 2 * 1.8);
   assert.equal(result.documents[0].needsVisualReview.length, 0);
+});
+test('drawing margin evidence is rerendered from the correct rotated physical page and two pages still fit twelve images', options, async () => {
+  const file = await fixture('two-drawing-margins.pdf', [
+    { width: 600, height: 360, extraStream: '1 0 0 rg 12 12 120 150 re f\n' },
+    { width: 360, height: 600, rotate: 90, extraStream: '0 0 1 rg 0 0 360 600 re f\n' },
+  ]);
+  const result = await prepareDrawingDocuments([file], path.join(temporaryRoot, 'drawing-margins'));
+  assert.equal(result.images.length, 12);
+  assert.deepEqual(result.pages.map(page => [page.page, page.landscape, page.imagePaths.length]), [[1, true, 6], [2, true, 6]]);
+  const focusImages = [];
+  for (const page of result.pages) {
+    const focus = page.imagePaths.at(-1), expected = path.join(temporaryRoot, `margin-page-${page.page}-reference`);
+    assert.equal(path.basename(focus), `doc-1-page-${page.page}-focus-left-lower.png`);
+    // This fixture renders at 5200 x 3120 after rotation. Compare the narrow
+    // lower-left region with a direct Poppler render from that physical page.
+    await runProcess(poppler.render, ['-f', String(page.page), '-l', String(page.page), '-singlefile', '-scale-to', '5200', '-x', '0', '-y', '1460', '-W', '1400', '-H', '1660', '-png', file.path, expected]);
+    const actual = await fs.readFile(focus), reference = await fs.readFile(expected + '.png');
+    assert.deepEqual(actual, reference);
+    assert.equal(actual.readUInt32BE(16), 1400);
+    assert.equal(actual.readUInt32BE(20), 1660);
+    focusImages.push(actual);
+  }
+  assert.notDeepEqual(focusImages[0], focusImages[1], 'different physical pages must not share the first page crop');
+  const coverage = JSON.parse(await fs.readFile(result.coverage.manifestPath, 'utf8'));
+  assert.equal(coverage.totalImages, 12);
+  assert.deepEqual(coverage.pages.map(page => page.images), result.pages.map(page => page.imagePaths.map(image => path.basename(image))));
+  const source = await fs.readFile(result.sourcePath, 'utf8');
+  for (const page of result.pages) assert.ok(source.includes(`doc-1-page-${page.page}-focus-left-lower.png`));
+  assert.deepEqual(result.documents[0].needsVisualReview, []);
+});
+
+test('a failed margin render keeps all original drawing images and explicitly requires review', options, async () => {
+  const file = await fixture('drawing-margin-failure.pdf', [{ width: 600, height: 360, text: 'Original drawing evidence' }]);
+  const scriptDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../skills/specification-rule-parser/scripts');
+  const directory = path.join(temporaryRoot, 'drawing-margin-failure');
+  const code = [
+    'import json,sys',
+    'sys.path.insert(0,sys.argv[1])',
+    'import pdf_core',
+    'pdf_core.set_poppler(json.loads(sys.argv[5]))',
+    'original=pdf_core._render',
+    'def render(file,page,prefix,**options):',
+    '    if str(prefix).endswith("-focus-left-lower"): raise RuntimeError("deliberate margin failure")',
+    '    return original(file,page,prefix,**options)',
+    'pdf_core._render=render',
+    'result=pdf_core.prepare_documents([{ "path":sys.argv[2], "name":sys.argv[3] }],sys.argv[4],detail_mode=True)',
+    'print(json.dumps(result))',
+  ].join('\n');
+  const { stdout } = await runProcess(python(), ['-X', 'utf8', '-c', code, scriptDirectory, file.path, file.name, directory, JSON.stringify(poppler)]);
+  const result = JSON.parse(stdout);
+  assert.equal(result.images.length, 5);
+  assert.equal(result.pages[0].imagePaths.length, 5);
+  assert.deepEqual(result.documents[0].imagePages, [1]);
+  assert.deepEqual(result.documents[0].needsVisualReview, [1]);
+  assert.equal(result.coverage.renderedPages, 1);
+  assert.equal(result.coverage.totalImages, 5);
+  assert.deepEqual(result.coverage.missingImagePages, []);
+  assert.ok(result.warnings.some(warning => /左下边栏.*失败/.test(warning)));
+  const coverage = JSON.parse(await fs.readFile(result.coverage.manifestPath, 'utf8'));
+  assert.deepEqual(coverage.pages[0].images, result.images.map(image => path.basename(image)));
+  assert.equal((await fs.readFile(result.sourcePath, 'utf8')).includes('-focus-left-lower.png'), false);
 });
 test('table audit augments image-only pages without dropping other physical pages', options, async () => {
   const file = await fixture('table-audit.pdf', [{ text: 'normal source page' }, { visual: true }]);
@@ -173,6 +234,6 @@ test('the service invokes both Python Skill modes and preserves their output con
   const drawing = await prepareDrawingDocuments([file], path.join(temporaryRoot, 'service-drawing'));
   assert.equal(drawing.preparation.mode, 'drawing');
   assert.equal(drawing.coverage.physicalPages, 1);
-  assert.equal(drawing.images.length, 5);
+  assert.equal(drawing.images.length, 6);
   assert.deepEqual(drawing.documents[0].textPages, specification.documents[0].textPages);
 });
