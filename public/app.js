@@ -58,7 +58,7 @@
     const when = spec.createdAt && !Number.isNaN(created.getTime()) ? `建立于 ${new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(created)}` : "建立时间未记录";
     return (batchFirst ? [batch, when] : [when, batch]).filter(Boolean).join(" · ");
   }
-  const specListKey = () => JSON.stringify([state.specId, state.specifications.map(({ id, status, name, metadata, ruleCount, recordCount, informationSummary, classification, warningsCount, createdAt }) => ({ id, status, name, metadata, ruleCount, recordCount, informationSummary, classification, warningsCount, createdAt }))]);
+  const specListKey = () => JSON.stringify([state.specId, state.specifications.map(({ id, status, sourceSha256, name, metadata, ruleCount, recordCount, informationSummary, classification, warningsCount, createdAt }) => ({ id, status, sourceSha256, name, metadata, ruleCount, recordCount, informationSummary, classification, warningsCount, createdAt }))]);
 
   async function api(url, options = {}) {
     const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 25000);
@@ -84,8 +84,8 @@
     const drawBusy = state.drawingSubmitting || active(state.batch?.status);
     $("build-spec").disabled = specBusy || !state.configured || !$("spec-file").files.length;
     $("spec-file").disabled = specBusy; $("spec-label").disabled = specBusy;
-    $("build-spec").textContent = specBusy ? "正在提交规范…" : "解析并建立规范库 →";
-    $("spec-start-hint").textContent = specBusy ? "上传完成后，规范将在后台解析" : !state.configured ? "等待服务和模型配置就绪" : $("spec-file").files.length ? "整份规范将分批解析并核对" : active(state.specJob?.status) ? "当前规范在后台解析，可继续新增其他规范" : "选择一份规范 PDF 后开始";
+    $("build-spec").textContent = specBusy ? "正在提交规范…" : "导入并解析规范 →";
+    $("spec-start-hint").textContent = specBusy ? "上传完成后，规范将在后台解析" : !state.configured ? "等待服务和模型配置就绪" : $("spec-file").files.length ? "整份规范将分批解析并核对" : active(state.specJob?.status) ? "当前规范在后台解析，可继续新增其他规范" : "这里只导入技术规范 PDF；对应图纸在下一步导入";
     $("start-drawings").disabled = drawBusy || !state.configured || !$("spec-select").value || !state.files.length;
     $("drawing-files").disabled = drawBusy; $("spec-select").disabled = drawBusy; $("production-stage").disabled = drawBusy;
     $("dropzone").classList.toggle("disabled", drawBusy); $("dropzone").setAttribute("aria-disabled", str(drawBusy));
@@ -158,11 +158,33 @@
     if (Number(data.failedVisualPages) > 0) panel.body.append(el("p", "notice", `${data.failedVisualPages} 页图像未能提交，请查看原 PDF。`));
     panel.body.append(el("p", "coverage-note", data.note || "这些记录说明页面已提交模型，不代表模型理解正确或没有遗漏。图像证据和待确认内容仍需对照原文。")); return panel.node;
   }
+  function specificationKey(spec) {
+    return spec?.sourceSha256 ? `file:${spec.sourceSha256}` : `job:${spec?.id}`;
+  }
+  function specificationViews(specifications, selectedId) {
+    const groups = new Map();
+    const sorted = [...specifications].sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
+    for (const spec of sorted) {
+      const key = specificationKey(spec);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(spec);
+    }
+    const library = [], completed = [];
+    for (const attempts of groups.values()) {
+      library.push(attempts.find(spec => active(spec.status) || spec.status === "completed") || attempts[0]);
+      const ready = attempts.find(spec => spec.status === "completed");
+      if (ready) completed.push(attempts.find(spec => spec.id === selectedId && spec.status === "completed") || ready);
+    }
+    return { library, completed };
+  }
   function renderSpecList() {
     state.specListKey = specListKey();
-    const holder = $("spec-list"); holder.replaceChildren(); $("spec-count").textContent = `${state.specifications.length} 个`;
-    for (const spec of state.specifications) {
-      const item = el("button", `library-item ${spec.id === state.specId ? "selected" : ""}`); item.type = "button"; item.setAttribute("aria-pressed", str(spec.id === state.specId));
+    const { library, completed } = specificationViews(state.specifications, state.specId);
+    const selected = state.specifications.find(spec => spec.id === state.specId) || state.specJob;
+    const holder = $("spec-list"); holder.replaceChildren(); $("spec-count").textContent = `${library.length} 个`;
+    for (const spec of library) {
+      const chosen = Boolean(selected) && specificationKey(spec) === specificationKey(selected);
+      const item = el("button", `library-item ${chosen ? "selected" : ""}`); item.type = "button"; item.setAttribute("aria-pressed", str(chosen));
       const meta = spec.metadata || {}; item.append(el("strong", "", specificationTitle(meta) || spec.name || "技术规范"), el("small", "", meta.title || spec.name || ""), badge(spec.status));
       if (spec.status === "completed") {
         const counts = spec.informationSummary;
@@ -173,9 +195,9 @@
       item.append(el("small", "creation-meta", creationLabel(spec)));
       item.addEventListener("click", () => selectSpec(spec.id).catch(error => showAlert(error.message))); holder.append(item);
     }
-    if (!state.specifications.length) holder.append(el("p", "placeholder", "规范库还没有内容，请先上传一份技术规范。"));
+    if (!library.length) holder.append(el("p", "placeholder", "规范库还没有内容，请先上传一份技术规范。"));
     const select = $("spec-select"), previous = select.value; select.replaceChildren();
-    const completed = state.specifications.filter(spec => spec.status === "completed"), option = el("option", "", completed.length ? "选择规范版本" : "请先建立技术规范库"); option.value = ""; select.append(option);
+    const option = el("option", "", completed.length ? "选择技术规范" : "请先建立技术规范库"); option.value = ""; select.append(option);
     for (const spec of completed) { const o = el("option", "", [specificationTitle(spec.metadata) || spec.name || "技术规范", creationLabel(spec, true), spec.metadata?.title].filter(Boolean).join(" · ")); o.value = spec.id; select.append(o); }
     if (completed.some(spec => spec.id === previous)) select.value = previous;
     else if (completed.some(spec => spec.id === state.specId)) select.value = state.specId;
