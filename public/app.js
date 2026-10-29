@@ -2,7 +2,7 @@
 
 (() => {
   const $ = id => document.getElementById(id);
-  const state = { configured: false, specifications: [], specId: null, specJob: null, specSubmitting: false, drawingSubmitting: false, files: [], batchId: null, batch: null, drawingId: null, resultKey: "", filter: "core", search: "", pollTimer: null, pollRunning: false, pollErrors: 0, specListRequest: null, specRequests: new Map(), specListKey: "", retryingDrawings: new Set() };
+  const state = { configured: false, specifications: [], specId: null, specJob: null, specSubmitting: false, drawingSubmitting: false, files: [], batchId: null, batch: null, drawingId: null, resultKey: "", filter: "core", search: "", pollTimer: null, pollRunning: false, pollErrors: 0, specListRequest: null, specRequests: new Map(), specListKey: "", retryingDrawings: new Set(), savedBatches: [], savedSpecId: null, savedLoading: false, savedError: "", savedRequest: 0 };
   const statusNames = { queued: "等待处理", preparing: "读取页面", extracting: "解析规则", matching: "匹配要求", auditing: "核对原文", running: "正在处理", completed: "已完成", partial: "部分完成", failed: "未完成" };
   const strengthNames = { required: "必须", prohibited: "禁止", recommended: "推荐", permitted: "允许", reference: "参考", conditional: "条件适用" };
   const dispositionNames = { applicable: "适用", not_applicable: "不适用", overridden: "图纸覆盖", needs_confirmation: "待确认" };
@@ -249,9 +249,84 @@
     input.addEventListener("input", render); scope.addEventListener("change", render); panel.body.append(controls, count, rows); holder.append(panel.node); render();
   }
   async function selectSpec(id) {
+    if (state.specId !== id) { state.batchId = null; state.batch = null; state.drawingId = null; state.resultKey = ""; renderBatch(true); }
+    state.savedRequest++; state.savedSpecId = id; state.savedBatches = []; state.savedError = ""; state.savedLoading = true;
     state.specId = id; state.specJob = state.specifications.find(spec => spec.id === id) || null; renderSpecList(); $("spec-detail").replaceChildren(el("p", "placeholder", "正在读取规范详情…")); updateUrl(); schedulePoll();
-    const job = await fetchSpecJob(id); if (state.specId !== id) return;
+    renderSavedDrawings();
+    let job;
+    try { job = await fetchSpecJob(id); }
+    catch (error) {
+      if (state.specId !== id) return;
+      state.savedLoading = false; state.savedError = error.message; renderSavedDrawings(); throw error;
+    }
+    if (state.specId !== id) return;
     state.specJob = job; updateSpecSummary(job); if (job.status === "completed" && !active(state.batch?.status)) $("spec-select").value = id; renderSpec(job); updateControls(); schedulePoll();
+    await refreshSavedDrawings(id, { open: true });
+  }
+  function savedDrawingRows(batches, specificationId) {
+    const groups = new Map();
+    const sorted = [...list(batches)].sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
+    for (const batch of sorted) {
+      if (batch.specificationId !== specificationId) continue;
+      for (const drawing of list(batch.drawings)) {
+        const key = JSON.stringify([batch.stage, drawing.sourceSha256 ? `file:${drawing.sourceSha256}` : `drawing:${batch.id}/${drawing.id}`]);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push({ ...drawing, batchId: batch.id, specificationId, stage: batch.stage });
+      }
+    }
+    return [...groups.values()].map(attempts => attempts.find(drawing => drawing.hasResult) || attempts[0]);
+  }
+  function renderSavedDrawings() {
+    const holder = $("saved-drawings-list"), count = $("saved-drawings-count"); holder.replaceChildren();
+    $("refresh-drawings").disabled = !state.specId || state.savedLoading;
+    if (state.savedLoading) { count.textContent = "读取中"; holder.append(el("p", "placeholder", "正在读取这份规范的已有图纸…")); return; }
+    if (state.savedError) { count.textContent = "读取失败"; holder.append(el("p", "review-note", `已有图纸读取失败：${state.savedError}。请点击“刷新已有图纸”，无需重新上传已处理的文件。`)); return; }
+    const batches = state.savedBatches.map(batch => batch.id === state.batch?.id ? { ...batch, status: state.batch.status, drawings: list(state.batch.drawings).map(drawing => ({ ...drawing, hasResult: drawing.status === "completed" && list(drawing.result?.requirements).length > 0, partName: drawing.result?.drawing?.name, partNumber: drawing.result?.drawing?.partNumber, requirementCount: list(drawing.result?.requirements).length })) } : batch);
+    const rows = savedDrawingRows(batches, state.specId), completed = rows.filter(row => row.hasResult).length;
+    count.textContent = `${completed} 张已完成 / 共 ${rows.length} 张`;
+    if (!rows.length) { holder.append(el("p", "placeholder", state.specId ? "这份规范还没有图纸结果，可展开下方入口导入对应图纸。" : "先选择一份技术规范，即可查看其已有图纸与结果。")); return; }
+    for (const row of rows) {
+      const button = el("button", `saved-drawing-item ${row.batchId === state.batchId && row.id === state.drawingId ? "selected" : ""}`), info = el("span", "saved-drawing-info"), meta = el("span", "saved-drawing-meta");
+      button.type = "button"; button.setAttribute("aria-pressed", str(row.batchId === state.batchId && row.id === state.drawingId));
+      info.append(el("strong", "", row.partName || row.name));
+      if (row.partName && row.partName !== row.name) info.append(el("small", "", row.name));
+      meta.append(badge(row.status)); if (row.hasResult) meta.append(el("span", "", `${row.requirementCount ?? 0} 项要求`));
+      meta.append(el("span", "", stageNames[row.stage] || row.stage));
+      button.append(info, meta, el("span", "saved-drawing-action", row.hasResult ? "查看结果 →" : "查看处理状态 →"));
+      button.addEventListener("click", () => openSavedDrawing(row, { scroll: true }).catch(error => showAlert(error.message))); holder.append(button);
+    }
+  }
+  async function refreshSavedDrawings(id, { open = false } = {}) {
+    if (!id || state.specId !== id) return;
+    const request = ++state.savedRequest;
+    if (state.savedSpecId !== id || !state.savedBatches.length) state.savedLoading = true;
+    state.savedSpecId = id; state.savedError = ""; renderSavedDrawings();
+    try {
+      const data = await api(`/api/drawing-batches?specificationId=${enc(id)}`);
+      if (state.specId !== id || request !== state.savedRequest) return;
+      state.savedBatches = list(data.batches).filter(batch => batch.specificationId === id); state.savedLoading = false; renderSavedDrawings();
+      const rows = savedDrawingRows(state.savedBatches, id);
+      if (open) {
+        $("new-drawings").open = !rows.length;
+        const requested = state.savedBatches.find(batch => batch.id === state.batchId);
+        const row = requested ? { ...(list(requested.drawings).find(drawing => drawing.id === state.drawingId) || list(requested.drawings).find(drawing => drawing.hasResult) || list(requested.drawings)[0]), batchId: requested.id, specificationId: id } : rows.find(drawing => drawing.hasResult) || rows[0];
+        if (row?.id) await openSavedDrawing(row);
+        else { state.batchId = null; state.batch = null; state.drawingId = null; state.resultKey = ""; renderBatch(true); updateUrl(); }
+      }
+    } catch (error) {
+      if (state.specId !== id || request !== state.savedRequest) return;
+      state.savedLoading = false; state.savedError = error.message; renderSavedDrawings();
+      if (open && !state.batch) showAlert(error.message);
+    } finally { if (state.specId === id && request === state.savedRequest) { updateControls(); schedulePoll(); } }
+  }
+  async function openSavedDrawing(row, { scroll = false } = {}) {
+    if (row.specificationId !== state.specId) return;
+    state.batchId = row.batchId; state.drawingId = row.id; state.resultKey = ""; state.filter = "core"; state.search = "";
+    if (state.batch?.id !== row.batchId) { state.batch = null; renderBatch(true); }
+    renderSavedDrawings();
+    await loadBatch(row.batchId, true);
+    if (state.specId !== row.specificationId || state.batchId !== row.batchId || state.drawingId !== row.id) return;
+    if (scroll) $("results-heading").scrollIntoView({ behavior: "smooth", block: "start" });
   }
   function renderFiles() {
     const holder = $("file-list"); holder.replaceChildren(); holder.hidden = !state.files.length;
@@ -322,6 +397,7 @@
         drawing.status = "queued"; drawing.message = "等待重新核对"; delete drawing.result; delete drawing.error;
         state.batch.status = "queued"; state.batch.message = `重新核对 ${drawing.name || "本零件"}`; state.resultKey = ""; renderBatch(true);
         await loadBatch(batchId, true);
+        await refreshSavedDrawings(state.specId);
       }
     } catch (error) {
       showAlert(error.message);
@@ -370,7 +446,8 @@
     holder.append(toolbar, caption, tableWrap, el("p", "result-footnote", "本页用于核对资料中的制造约束与检验目标，不生成已批准的操作规程或完整工艺路线。请结合原图确认适用条件和疑点；本结果不直接判定产品合格。")); render();
   }
   function renderBatch(force = false) {
-    const batch = state.batch; $("batch-content").hidden = !batch; $("empty-state").hidden = Boolean(batch); if (!batch) return;
+    renderSavedDrawings();
+    const batch = state.batch; $("batch-content").hidden = !batch; $("empty-state").hidden = Boolean(batch); if (!batch) { updateControls(); return; }
     const drawings = list(batch.drawings); if (!drawings.some(item => item.id === state.drawingId)) state.drawingId = drawings.find(item => item.result)?.id || drawings[0]?.id || null;
     const bar = $("batch-status"); bar.replaceChildren(badge(batch.status)); if (active(batch.status)) bar.append(el("span", "spinner")); const completed = drawings.filter(item => item.status === "completed").length, failed = drawings.filter(item => item.status === "failed").length; bar.append(el("span", "", `${batch.error || batch.message || statusNames[batch.status]} · ${completed} / ${drawings.length} 个零件完成${failed ? `，${failed} 个未完成` : ""}`));
     const nav = $("drawing-list"); nav.replaceChildren(); drawings.forEach((drawing, index) => { const button = el("button", `drawing-item ${drawing.id === state.drawingId ? "selected" : ""}`); button.type = "button"; button.setAttribute("aria-pressed", str(drawing.id === state.drawingId)); button.append(el("strong", "", drawing.result?.drawing?.name || drawing.name || `零件 ${index + 1}`), el("small", "", drawing.result?.drawing?.partNumber || drawing.name || ""), badge(drawing.status)); button.addEventListener("click", () => { state.drawingId = drawing.id; state.filter = "core"; state.search = ""; state.resultKey = ""; renderBatch(true); updateUrl(); }); nav.append(button); });
@@ -378,10 +455,11 @@
     if (force || key !== state.resultKey) { state.resultKey = key; renderDrawing(drawing); } updateControls(); updateUrl();
   }
   async function loadBatch(id, force = false) {
-    const batch = await api(`/api/drawing-batches/${enc(id)}`); if (state.batchId !== id) return; state.batch = batch; renderBatch(force); schedulePoll();
+    const specId = state.specId;
+    const batch = await api(`/api/drawing-batches/${enc(id)}`); if (state.batchId !== id || state.specId !== specId || batch.specificationId !== specId) return; state.batch = batch; renderBatch(force); schedulePoll();
   }
   function schedulePoll() {
-    clearTimeout(state.pollTimer); if (state.specifications.some(spec => active(spec.status)) || active(state.specJob?.status) || active(state.batch?.status)) state.pollTimer = setTimeout(poll, state.pollErrors ? 5000 : 2000);
+    clearTimeout(state.pollTimer); if (state.specifications.some(spec => active(spec.status)) || active(state.specJob?.status) || active(state.batch?.status) || state.savedBatches.some(batch => active(batch.status))) state.pollTimer = setTimeout(poll, state.pollErrors ? 5000 : 2000);
   }
   async function poll() {
     if (state.pollRunning) return; state.pollRunning = true;
@@ -399,6 +477,7 @@
         }
       })); }
       if (active(state.batch?.status)) tasks.push(loadBatch(state.batchId));
+      if (state.savedBatches.some(batch => active(batch.status))) tasks.push(refreshSavedDrawings(state.specId));
       const outcomes = await Promise.allSettled(tasks), failure = outcomes.find(outcome => outcome.status === "rejected");
       if (failure) throw failure.reason; state.pollErrors = 0;
     } catch (error) { state.pollErrors++; if (state.pollErrors === 3) showAlert(`${error.message} 页面将继续尝试读取状态，请勿重复提交相同任务。`); }
@@ -429,10 +508,11 @@
   for (const type of ["dragleave", "drop"]) dropzone.addEventListener(type, event => { event.preventDefault(); dropzone.classList.remove("dragover"); if (type === "drop") addFiles(Array.from(event.dataTransfer.files)); });
   $("drawing-form").addEventListener("submit", async event => {
     event.preventDefault(); if ($("start-drawings").disabled) return; state.drawingSubmitting = true; clearAlert(); updateControls();
-    try { const form = new FormData(); form.append("specificationId", $("spec-select").value); form.append("stage", $("production-stage").value); state.files.forEach(file => form.append("files", file)); const data = await api("/api/drawing-batches", { method: "POST", body: form }); state.batchId = data.id; state.batch = { id: data.id, status: "queued", message: "任务已创建，正在读取状态", specificationId: $("spec-select").value, stage: $("production-stage").value, drawings: [] }; state.drawingId = null; state.resultKey = ""; state.filter = "core"; state.search = ""; state.files = []; renderFiles(); renderBatch(true); await loadBatch(data.id, true); $("results-heading").scrollIntoView({ behavior: "smooth", block: "start" }); }
+    try { const specId = $("spec-select").value, stage = $("production-stage").value, form = new FormData(); form.append("specificationId", specId); form.append("stage", stage); state.files.forEach(file => form.append("files", file)); const data = await api("/api/drawing-batches", { method: "POST", body: form }); state.files = []; renderFiles(); if (state.specId !== specId) return; state.batchId = data.id; state.batch = { id: data.id, status: "queued", message: "任务已创建，正在读取状态", specificationId: specId, stage, drawings: [] }; state.drawingId = null; state.resultKey = ""; state.filter = "core"; state.search = ""; renderBatch(true); await loadBatch(data.id, true); await refreshSavedDrawings(specId); $("new-drawings").open = false; $("results-heading").scrollIntoView({ behavior: "smooth", block: "start" }); }
     catch (error) { showAlert(error.message); } finally { state.drawingSubmitting = false; updateControls(); schedulePoll(); }
   });
   $("refresh-health").addEventListener("click", () => { health(); schedulePoll(); });
+  $("refresh-drawings").addEventListener("click", () => refreshSavedDrawings(state.specId, { open: !state.batch }).catch(error => showAlert(error.message)));
   $("refresh-specs").addEventListener("click", async () => { try { await refreshSpecs(); if (state.specId) await selectSpec(state.specId); } catch (error) { showAlert(error.message); } });
   $("dismiss-alert").addEventListener("click", clearAlert); $("export-csv").addEventListener("click", exportCsv);
   $("export-json").addEventListener("click", () => { const result = currentResult(); if (result) download(JSON.stringify({ ...result, exportScope: { kind: "all_records", note: "完整资料，含采购交付、背景及待分类记录；以informationType区分，不全部视为工艺要求。" } }, null, 2), `${result.drawing?.partNumber || "零件"}-完整资料.json`, "application/json;charset=utf-8"); });
@@ -442,7 +522,7 @@
     const params = new URLSearchParams(location.search); state.specId = params.get("spec"); state.batchId = params.get("batch"); state.drawingId = params.get("drawing");
     if (params.has("job")) showAlert("当前页面已升级为两阶段工作台。历史任务仍保留在后端，可通过原任务 API 读取；请选择规范库后创建逐零件任务。");
     await health();
-    try { await refreshSpecs(); if (!state.specId) state.specId = state.specifications.find(spec => spec.status === "completed")?.id || state.specifications[0]?.id || null; const tasks = []; if (state.specId) tasks.push(selectSpec(state.specId)); if (state.batchId) tasks.push(loadBatch(state.batchId, true)); const results = await Promise.allSettled(tasks); for (const result of results) if (result.status === "rejected") showAlert(result.reason.message); }
+    try { await refreshSpecs(); if (!state.specId && state.batchId) { const batch = await api(`/api/drawing-batches/${enc(state.batchId)}`); state.specId = batch.specificationId; state.batch = batch; } if (!state.specId) state.specId = state.specifications.find(spec => spec.status === "completed")?.id || state.specifications[0]?.id || null; if (state.specId) await selectSpec(state.specId); else { renderSavedDrawings(); $("new-drawings").open = true; } }
     catch (error) { showAlert(error.message); $("spec-list").replaceChildren(el("p", "placeholder", "规范库读取失败，请检查服务后刷新。")); }
     updateControls(); schedulePoll();
   }

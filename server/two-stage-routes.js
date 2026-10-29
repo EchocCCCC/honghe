@@ -91,6 +91,16 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
       return { ...drawing, result, ...(drawing.status === 'completed' ? { message: `完成：制造与检验${result.informationSummary.core}项；采购交付${result.informationSummary.procurement}项；背景说明${result.informationSummary.context}项` } : {}) };
     })) };
   }
+  function batchSummary(job) {
+    const drawings = (job.drawings || []).map(drawing => {
+      const requirements = drawing.result?.requirements;
+      const hasResult = drawing.status === 'completed' && Array.isArray(requirements) && requirements.length > 0;
+      return { id: drawing.id, name: drawing.name, status: drawing.status, sourceSha256: drawing.sourceSha256 || '', hasResult,
+        partNumber: drawing.result?.drawing?.partNumber || '', partName: drawing.result?.drawing?.name || '', requirementCount: hasResult ? requirements.length : 0 };
+    });
+    return { id: job.id, specificationId: job.specificationId, stage: job.stage, status: job.status, createdAt: job.createdAt, updatedAt: job.updatedAt,
+      drawingCount: drawings.length, completedCount: drawings.filter(drawing => drawing.hasResult).length, drawings };
+  }
   function requireService(req, res, next) {
     if (!configured()) return res.status(503).json({ error: '请在本地 .env 配置 DEEPSEEK_API_KEY 并重启' });
     if (queue.size >= 40) return res.status(429).json({ error: '等待队列已满，请稍后提交' });
@@ -197,6 +207,18 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
       await persist('drawing-batches', job); res.status(202).json({ id });
       for (const drawing of drawings) enqueueDrawing(job, drawing, spec);
     } catch (error) { await cleanup(files); next(error); }
+  });
+  router.get('/drawing-batches', async (req, res) => {
+    const specificationId = req.query.specificationId;
+    if (typeof specificationId !== 'string' || !validId(specificationId)) return res.status(400).json({ error: '请提供有效的技术规范ID' });
+    if (!await find('specifications', specificationId)) return res.status(404).json({ error: '规范不存在' });
+    let dirs;
+    try { dirs = await fs.readdir(path.join(root, 'drawing-batches')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; dirs = []; }
+    const jobs = await Promise.all(dirs.filter(validId).map(id => find('drawing-batches', id)));
+    const batches = jobs.filter(job => job?.specificationId === specificationId)
+      .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0)).map(batchSummary);
+    res.json({ batches });
   });
   router.get('/drawing-batches/:id', async (req, res) => {
     const job = await find('drawing-batches', req.params.id);

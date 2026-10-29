@@ -23,8 +23,8 @@ pnpm start
 
 1. 技术规范库只用于导入技术规范；每份PDF在“已有规范”中显示一条。同文件的重复解析、调试和失败尝试保存在内部，不能按尝试次数累计为多份规范；不同文件内容仍分别保留。
 2. 默认查看制造约束与质量、检验要求；采购交付和背景说明可单独切换，展开查看条件、例外、覆盖关系、原文依据和分类理由。同一文件与解析版本已存在时复用正在处理或已完成的规范库。
-3. 到“图纸要求提取”选择对应的技术规范，再批量导入图纸。每份规范默认提供最新成功解析结果；打开历史结果时保留该结果关联的原解析ID。同一份规范的再次解析不改变已有图纸批次的绑定。每批最多20个PDF，每个默认25MB。
-4. 按零件切换，查看制造/检验/待确认项和全部规则的适用性处置表；展开证据打开对应规范或图纸物理页。
+3. 到“图纸要求提取”选择对应的技术规范，直接查看“已处理图纸与结果”。已有结果无需重新上传或重新提取；只有新增图纸时才展开上传区。每份规范默认提供最新成功解析结果；打开历史结果时保留原解析ID，同一规范的再次解析不改变已有图纸批次的绑定。每批新增最多20个PDF，每个默认25MB。
+4. 在已有图纸中点“查看结果”，按零件查看制造/检验/待确认项和全部规则的适用性处置表；展开证据打开对应规范或图纸物理页。查看和切换已有结果只读取保存的数据，不调用模型。
 5. CSV导出当前筛选与关键词范围的“工艺要求的名称”“量化指标”两列；JSON导出完整资料，含分类、身份、要求、规则处置、原文依据和运行记录。
 
 `?spec=ID&batch=ID&drawing=ID`支持恢复指定结果。默认保留所有生产阶段的条件；也可指定样件、试生产、批产。没有输入的属性应保留待确认，不推定材料形态、厚度、类别或生产阶段。
@@ -134,6 +134,7 @@ pi -p --mode json --provider deepseek-extract --model deepseek-flash
 - `POST /api/specifications`：multipart单文件file，可选label；返回id与cached。
 - `GET /api/specifications/:id`：进度和完整规则库；`/file`返回原PDF。
 - `POST /api/drawing-batches`：multipart字段specificationId、files、stage（all/sample/trial/batch）。
+- `GET /api/drawing-batches?specificationId=ID`：发现该精确规范解析ID下的已有批次和图纸摘要；不包含文件路径、提示词或完整要求正文，不执行模型任务。
 - `GET /api/drawing-batches/:id`：批次进度、各零件独立结果。
 - `GET /api/drawing-batches/:id/drawings/:drawingId`：单零件结果；`/file`返回该图纸PDF。
 - `POST /api/drawing-batches/:id/drawings/:drawingId/retry`：只重新核对该零件。正常结束的完整初次JSON可复用，截断初次输出不复用；原结果和失败运行均保留。
