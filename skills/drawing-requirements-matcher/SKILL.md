@@ -9,17 +9,17 @@ description: 结合选定规范与单个零件工程图，判断适用及覆盖�
 
 ## PDF预处理脚本
 
-本Skill必须与specification-rule-parser两个完整目录并列安装；[scripts/prepare-pdf.mjs](scripts/prepare-pdf.mjs)复用相邻规范Skill的通用PDF引擎，不依赖网站server或package.json。需要Node.js 22.19+和Poppler（pdfinfo/pdftotext/pdftoppm）；可通过PDFINFO_PATH、PDFTOTEXT_PATH、PDFTOPPM_PATH指定工具。单独准备图纸不需要Python、模型密钥或规范原PDF。
+本Skill必须与specification-rule-parser两个完整目录并列安装；[scripts/prepare_pdf.py](scripts/prepare_pdf.py)复用相邻规范Skill的Python通用PDF引擎，不依赖Node.js、网站server或package.json。需要Python 3.10+和Poppler（pdfinfo/pdftotext/pdftoppm）；可通过PDFINFO_PATH、PDFTOTEXT_PATH、PDFTOPPM_PATH指定工具。单独准备图纸仅使用Python标准库，不需要pdfplumber、模型密钥或规范原PDF。
 
 原始图纸尚无预处理结果时，调用方执行：
 
 ~~~text
-node /path/to/skills/drawing-requirements-matcher/scripts/prepare-pdf.mjs --input "/data/零件图.pdf" --output "/data/图纸预处理"
+python /path/to/skills/drawing-requirements-matcher/scripts/prepare_pdf.py --input "/data/零件图.pdf" --output "/data/图纸预处理"
 ~~~
 
 输出目录须为新目录或空目录；可用--name保留原文件名。读取prepared.json、source.txt、coverage.json及所列图片，保留warnings与缺图页。每个物理页均有2600像素整图，并从5200像素重新渲染四张重叠局部；竖版、扫描页和空文字页同样处理。文字层、局部图和表格候选都只是证据，不能替代下方的空间对应与适用性判断。脚本不调用模型，不生成零件要求。
 
-已有完整证据时不必重复运行。网站由后端调用同一脚本模块，再把规范库、图纸证据和本Skill交给Pi -p；当前Pi无命令工具，加载Skill本身不会自动执行脚本。逐图证据超过调用方图片上限时明确拆分或失败，不静默截页。
+已有完整证据时不必重复运行。网站由后端启动同一套Python脚本，再把规范库、图纸证据和本Skill交给Pi -p；当前Pi无命令工具，加载Skill本身不会自动执行脚本。逐图证据超过调用方图片上限时明确拆分或失败，不静默截页。
 
 ## 信息层次与主清单
 

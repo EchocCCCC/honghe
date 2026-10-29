@@ -9,17 +9,17 @@ description: 将技术规范整理为制造约束、质量检验、采购交付�
 
 ## PDF预处理脚本
 
-本Skill与相邻的drawing-requirements-matcher作为一套安装，保留两个完整目录与scripts。通用PDF引擎在本目录，图纸Skill复用它，不需要网站server代码。需要Node.js 22.19+、Poppler（pdfinfo/pdftotext/pdftoppm）、Python 3.10+；表格依赖见[scripts/requirements.txt](scripts/requirements.txt)，使用该Python安装。可通过PDFINFO_PATH、PDFTOTEXT_PATH、PDFTOPPM_PATH、PYTHON_PATH指定工具；独立脚本读取进程环境，不自动加载网站.env，也不需要模型密钥。
+本Skill与相邻的drawing-requirements-matcher作为一套安装，保留两个完整目录与scripts。全部预处理脚本使用Python，通用PDF引擎在本目录，图纸Skill复用它，不需要Node.js或网站server代码。需要Python 3.10+、Poppler（pdfinfo/pdftotext/pdftoppm）；表格依赖见[scripts/requirements.txt](scripts/requirements.txt)，使用执行脚本的Python安装。可通过PDFINFO_PATH、PDFTOTEXT_PATH、PDFTOPPM_PATH指定工具；独立脚本读取进程环境，不自动加载网站.env，也不需要模型密钥。网站另可用PYTHON_PATH指定运行这些脚本的Python。
 
-原始输入为PDF且尚无预处理结果时，调用方执行[scripts/prepare-pdf.mjs](scripts/prepare-pdf.mjs)：
+原始输入为PDF且尚无预处理结果时，调用方执行[scripts/prepare_pdf.py](scripts/prepare_pdf.py)：
 
 ~~~text
-node /path/to/skills/specification-rule-parser/scripts/prepare-pdf.mjs --input "/data/规范.pdf" --output "/data/规范预处理" --audit-details
+python /path/to/skills/specification-rule-parser/scripts/prepare_pdf.py --input "/data/规范.pdf" --output "/data/规范预处理" --audit-details
 ~~~
 
 输出目录须为新目录或空目录；可用--name保留原文件名。脚本输出prepared.json（各页文字与图像路径、覆盖缺口和warnings）、source.txt、coverage.json、table-structure.json及图片。全部物理页保留2600像素整图，--audit-details为表格候选页与无文字页补充5200像素重叠局部；表格结构按物理格线展开合并单元格，空格不沿用邻值。缺图或裁图失败须保留覆盖缺口，不能把脚本成功等同完整识读。
 
-将source.txt、prepared.json中的当前批次图片和覆盖警告交给模型，再执行下方提取/查漏规则。已有完整证据时直接使用；“已有条目归类”不运行PDF脚本。脚本只准备证据，不调用模型、不生成规范规则。网站由后端调用同一脚本模块，再用Pi -p加载本Skill执行语义任务；加载Skill本身不会自动运行脚本。
+将source.txt、prepared.json中的当前批次图片和覆盖警告交给模型，再执行下方提取/查漏规则。已有完整证据时直接使用；“已有条目归类”不运行PDF脚本。脚本只准备证据，不调用模型、不生成规范规则。网站由后端启动同一套Python脚本，再用Pi -p加载本Skill执行语义任务；加载Skill本身不会自动运行脚本。
 
 ## 信息层次与计数
 

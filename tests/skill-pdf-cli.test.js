@@ -13,23 +13,45 @@ const project = fileURLToPath(new URL('../', import.meta.url));
 // contains no application, package manifest, .env file, or API credentials.
 try { process.loadEnvFile(path.join(project, '.env')); }
 catch (error) { if (error.code !== 'ENOENT') throw error; }
-const environment = { ...process.env };
-for (const key of ['DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY']) delete environment[key];
+async function executable(command) {
+  if (path.isAbsolute(command)) return command;
+  const searchPath = Object.entries(process.env).find(([key]) => key.toLowerCase() === 'path')?.[1] || '';
+  const extensions = process.platform === 'win32' ? ['', ...(process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';')] : [''];
+  for (const directory of searchPath.split(path.delimiter).filter(Boolean)) {
+    for (const extension of extensions) {
+      const candidate = path.resolve(directory.replace(/^"|"$/g, ''), command + extension);
+      try { await fs.access(candidate); return candidate; } catch { /* Try the next installed executable. */ }
+    }
+  }
+  return command;
+}
+const python = await executable(process.env.PYTHON_PATH || (process.platform === 'win32' ? 'python' : 'python3'));
 const poppler = {
-  info: environment.PDFINFO_PATH || 'pdfinfo',
-  text: environment.PDFTOTEXT_PATH || 'pdftotext',
-  render: environment.PDFTOPPM_PATH || 'pdftoppm',
+  info: await executable(process.env.PDFINFO_PATH || 'pdfinfo'),
+  text: await executable(process.env.PDFTOTEXT_PATH || 'pdftotext'),
+  render: await executable(process.env.PDFTOPPM_PATH || 'pdftoppm'),
 };
-const python = environment.PYTHON_PATH || (process.platform === 'win32' ? 'python' : 'python3');
+const environment = { ...process.env };
+for (const key of Object.keys(environment)) {
+  if (key.toLowerCase() === 'path' || ['DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'NODE_PATH', 'NODE_OPTIONS'].includes(key)) delete environment[key];
+}
+// Run only explicit Python and Poppler binaries. The Skill cannot discover or
+// invoke Node through PATH, and the drawing test additionally disables site packages.
+environment.PATH = '';
+environment.PDFINFO_PATH = poppler.info;
+environment.PDFTOTEXT_PATH = poppler.text;
+environment.PDFTOPPM_PATH = poppler.render;
 const childOptions = { env: environment, windowsHide: true, timeout: 120000, maxBuffer: 2e6, encoding: 'utf8' };
 async function available(command, args) {
   try { await execute(command, args, { ...childOptions, timeout: 20000 }); return true; }
   catch { return false; }
 }
 const hasPoppler = (await Promise.all(Object.values(poppler).map(command => available(command, ['-v'])))).every(Boolean);
+const hasPython = await available(python, ['--version']);
 const hasTables = await available(python, ['-X', 'utf8', '-c', 'import pdfplumber']);
-const pdfOptions = { skip: !hasPoppler && 'Poppler is needed for real PDF CLI integration tests' };
-const specOptions = { skip: (!hasPoppler || !hasTables) && 'Poppler and pdfplumber are needed for real specification CLI integration tests' };
+const pythonOptions = { skip: !hasPython && 'Python is needed for Skill CLI integration tests' };
+const pdfOptions = { skip: (!hasPython || !hasPoppler) && 'Python and Poppler are needed for real PDF CLI integration tests' };
+const specOptions = { skip: (!hasPython || !hasPoppler || !hasTables) && 'Python, Poppler and pdfplumber are needed for real specification CLI integration tests' };
 let temporaryRoot, bundle;
 before(async () => {
   temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'honghe-skill-cli-'));
@@ -48,10 +70,11 @@ after(async () => {
   await fs.rm(temporaryRoot, { recursive: true, force: true });
 });
 
-function cli(skill) { return path.join(bundle, 'skills', skill, 'scripts', 'prepare-pdf.mjs'); }
+function cli(skill) { return path.join(bundle, 'skills', skill, 'scripts', 'prepare_pdf.py'); }
 async function runCli(skill, args, overrides = {}) {
+  const { pythonArgs = [], ...options } = overrides;
   try {
-    const result = await execute(process.execPath, [cli(skill), ...args], { ...childOptions, cwd: bundle, ...overrides });
+    const result = await execute(python, [...pythonArgs, '-X', 'utf8', cli(skill), ...args], { ...childOptions, cwd: bundle, ...options });
     return { ...result, code: 0 };
   } catch (error) {
     // Preserve the observable exit code and output rather than hiding a CLI
@@ -92,7 +115,8 @@ async function fixture(name, pages) {
   return filename;
 }
 
-test('portable specification CLI preserves merged grid cells, rotation and the trailing blank physical page', specOptions, async () => {
+test('portable Python specification CLI preserves merged cells, rotation and the trailing blank physical page without Node', specOptions, async () => {
+  await execute(python, ['-X', 'utf8', '-c', 'import shutil; assert shutil.which("node") is None'], childOptions);
   const grid = '0.5 w 10 20 300 160 re S 90 20 m 90 180 l S 190 20 m 190 180 l S 10 140 m 310 140 l S 10 100 m 190 100 l S 10 60 m 310 60 l S\n' +
     'BT /F1 10 Tf 20 155 Td (condition) Tj ET BT /F1 10 Tf 110 155 Td (note) Tj ET BT /F1 10 Tf 210 155 Td (value) Tj ET\n' +
     'BT /F1 10 Tf 20 115 Td (10) Tj ET BT /F1 10 Tf 20 75 Td (20) Tj ET BT /F1 10 Tf 20 35 Td (30) Tj ET\n' +
@@ -140,11 +164,11 @@ test('portable specification CLI preserves merged grid cells, rotation and the t
   await Promise.all(prepared.images.map(image => fs.access(image)));
 });
 
-test('portable drawing CLI makes five genuine detail images for a portrait scan without Python or model credentials', pdfOptions, async () => {
-  const input = await fixture('portrait drawing.pdf', [{ text: 'Drawing notes and raster detail', visual: true }]);
-  const output = path.join(temporaryRoot, 'drawing output');
+test('portable Python drawing CLI makes genuine portrait detail images with only the standard library and no Node or credentials', pdfOptions, async () => {
+  const input = await fixture('portrait drawing & (check).pdf', [{ text: 'Drawing notes and raster detail', visual: true }]);
+  const output = path.join(temporaryRoot, 'drawing output & (check)');
   const response = await runCli('drawing-requirements-matcher', ['--input', input, '--output', output, '--name', '零件图纸.pdf'], {
-    env: { ...environment, PYTHON_PATH: path.join(temporaryRoot, '__missing_python__') },
+    pythonArgs: ['-S'],
   });
   assert.equal(response.code, 0, response.stderr);
   const summary = JSON.parse(response.stdout), prepared = await readJson(summary.preparedPath);
@@ -164,7 +188,7 @@ test('portable drawing CLI makes five genuine detail images for a portrait scan 
   await assert.rejects(fs.access(path.join(output, 'table-structure.json')), { code: 'ENOENT' });
 });
 
-test('skill PDF CLIs reject unknown arguments and missing argument values before writing an output', async () => {
+test('skill Python CLIs reject unknown arguments and missing argument values before writing an output', pythonOptions, async () => {
   const input = await fixture('arguments.pdf', [{ text: 'input must remain unchanged' }]);
   const original = await fs.readFile(input);
   for (const [index, skill] of ['specification-rule-parser', 'drawing-requirements-matcher'].entries()) {
@@ -182,7 +206,7 @@ test('skill PDF CLIs reject unknown arguments and missing argument values before
   assert.deepEqual(await fs.readFile(input), original);
 });
 
-test('skill PDF CLIs refuse nonempty output directories and preserve their files', async () => {
+test('skill Python CLIs refuse nonempty output directories and preserve their files', pythonOptions, async () => {
   const input = await fixture('existing-output.pdf', [{ text: 'valid source PDF' }]);
   for (const [index, skill] of ['specification-rule-parser', 'drawing-requirements-matcher'].entries()) {
     const output = path.join(temporaryRoot, `already-populated-${index}`);
@@ -198,7 +222,7 @@ test('skill PDF CLIs refuse nonempty output directories and preserve their files
   }
 });
 
-test('missing PDF tooling fails explicitly without publishing a prepared result', async () => {
+test('missing PDF tooling fails explicitly without publishing a prepared result', pythonOptions, async () => {
   const input = await fixture('missing-tool.pdf', [{ text: 'valid source PDF' }]);
   const output = path.join(temporaryRoot, 'missing-info-output');
   const response = await runCli('drawing-requirements-matcher', ['--input', input, '--output', output], {
@@ -210,14 +234,32 @@ test('missing PDF tooling fails explicitly without publishing a prepared result'
   await assert.rejects(fs.access(path.join(output, 'prepared.json')), { code: 'ENOENT' });
 });
 
-test('missing table Python fails explicitly without publishing a specification result', pdfOptions, async () => {
-  const input = await fixture('missing-python.pdf', [{ text: 'valid specification source' }]);
-  const output = path.join(temporaryRoot, 'missing-python-output');
+test('missing table dependency fails explicitly without publishing a specification result', pdfOptions, async () => {
+  await execute(python, ['-S', '-X', 'utf8', '-c', 'import importlib.util; assert importlib.util.find_spec("pdfplumber") is None'], childOptions);
+  const input = await fixture('missing-tables.pdf', [{ text: 'valid specification source' }]);
+  const output = path.join(temporaryRoot, 'missing-tables-output');
   const response = await runCli('specification-rule-parser', ['--input', input, '--output', output], {
-    env: { ...environment, PYTHON_PATH: path.join(temporaryRoot, '__missing_python__') },
+    pythonArgs: ['-S'],
   });
   assert.notEqual(response.code, 0);
   assert.equal(response.stdout.trim(), '');
-  assert.match(response.stderr, /PYTHON_PATH|Python|python|表格/);
+  assert.match(response.stderr, /pdfplumber|requirements|依赖|表格/i);
+  await assert.rejects(fs.access(path.join(output, 'prepared.json')), { code: 'ENOENT' });
+});
+
+test('drawing CLI explains a missing paired specification Skill before publishing output', pythonOptions, async () => {
+  const isolated = path.join(temporaryRoot, 'drawing alone');
+  const skill = path.join(isolated, 'drawing-requirements-matcher');
+  await fs.cp(path.join(project, 'skills', 'drawing-requirements-matcher'), skill, { recursive: true });
+  const input = await fixture('missing-pair.pdf', [{ text: 'valid drawing source' }]);
+  const output = path.join(temporaryRoot, 'missing-pair-output');
+  await assert.rejects(execute(python, ['-X', 'utf8', path.join(skill, 'scripts', 'prepare_pdf.py'), '--input', input, '--output', output], {
+    ...childOptions, cwd: isolated,
+  }), error => {
+    assert.notEqual(error.code, 0);
+    assert.equal(error.stdout.trim(), '');
+    assert.match(error.stderr, /specification-rule-parser|配套|并列/);
+    return true;
+  });
   await assert.rejects(fs.access(path.join(output, 'prepared.json')), { code: 'ENOENT' });
 });

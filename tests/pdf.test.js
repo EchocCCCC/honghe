@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import '../server/config.js';
-import { prepareDocuments, poppler, augmentTableEvidence } from '../server/pdf.js';
+import { prepareDocuments, prepareSpecification, prepareDrawingDocuments, poppler, augmentTableEvidence } from '../server/pdf.js';
 import { runProcess } from '../server/process.js';
 import { appendTableStructure, python } from '../server/table-structure.js';
 
@@ -157,4 +157,22 @@ test('physical page limits fail explicitly rather than omitting pages', options,
   const hundred = await fixture('hundred.pdf', Array.from({ length: 100 }, () => ({ text: 'x' })));
   const one = await fixture('one.pdf', [{ text: 'x' }]);
   await assert.rejects(prepareDocuments([hundred, hundred, one], path.join(temporaryRoot, 'total-limit'), { renderImages: false }), /不得超过200个物理页/);
+});
+
+test('the service invokes both Python Skill modes and preserves their output contracts', { skip: !popplerAvailable || !tableParserAvailable }, async () => {
+  const file = await fixture('python-service.pdf', [{ text: 'Shared service contract evidence', visual: true }]);
+  const tableDirectory = path.join(temporaryRoot, 'service-tables');
+  const specification = await prepareSpecification(file, path.join(temporaryRoot, 'service-specification'), { tableDirectory });
+  assert.equal(specification.preparation.mode, 'specification');
+  assert.equal(specification.coverage.physicalPages, 1);
+  assert.equal(specification.images.length, 1);
+  const tables = JSON.parse(await fs.readFile(path.join(tableDirectory, 'table-structure.json'), 'utf8'));
+  assert.equal(tables.file, file.name);
+  assert.equal(tables.pages.length, 1);
+  assert.match(await fs.readFile(specification.sourcePath, 'utf8'), /PDF_VECTOR_TABLE_STRUCTURE_DATA/);
+  const drawing = await prepareDrawingDocuments([file], path.join(temporaryRoot, 'service-drawing'));
+  assert.equal(drawing.preparation.mode, 'drawing');
+  assert.equal(drawing.coverage.physicalPages, 1);
+  assert.equal(drawing.images.length, 5);
+  assert.deepEqual(drawing.documents[0].textPages, specification.documents[0].textPages);
 });

@@ -4,9 +4,7 @@ import { createHash } from 'node:crypto';
 import { INFORMATION_TYPES, informationSummary } from './information-types.js';
 import { ROOT, MODEL_ID } from './config.js';
 import { runPi } from './pi.js';
-import { augmentTableEvidence } from '../skills/specification-rule-parser/scripts/pdf-core.mjs';
-import { prepareSpecification } from '../skills/specification-rule-parser/scripts/prepare-pdf.mjs';
-import { prepareDrawingDocuments } from '../skills/drawing-requirements-matcher/scripts/prepare-pdf.mjs';
+import { augmentTableEvidence, prepareSpecification, prepareDrawingDocuments } from './pdf.js';
 import { planPageBatches, writeBatchSource, ownsSource, technicalFactKey } from './batches.js';
 import { addNumericCoverageWarnings } from './numeric-coverage.js';
 import { sourceAliases, mapSourceNames, aliasSourceText, applyConservativeDrawingGuards } from './drawing-guards.js';
@@ -14,8 +12,8 @@ import { parseContract, specificationSchema, specificationPatchSchema, verifyReq
 
 export const SPEC_SKILL = path.join(ROOT, 'skills/specification-rule-parser');
 export const DRAWING_SKILL = path.join(ROOT, 'skills/drawing-requirements-matcher');
-export const PIPELINE_VERSION = 'two-stage-v5-skill-pdf';
-export const DRAWING_PIPELINE_VERSION = 'two-stage-v8-skill-pdf';
+export const PIPELINE_VERSION = 'two-stage-v6-python-skill';
+export const DRAWING_PIPELINE_VERSION = 'two-stage-v9-python-skill';
 const json = (file, value) => fs.writeFile(file, JSON.stringify(value, null, 2));
 export const digest = value => createHash('sha256').update(value).digest('hex');
 export async function specificationFingerprint(file, parserContent) {

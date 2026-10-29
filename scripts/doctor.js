@@ -6,6 +6,7 @@ import { PI_CLI } from '../server/pi.js';
 import { poppler } from '../server/pdf.js';
 import { SPEC_SKILL, DRAWING_SKILL } from '../server/two-stage-pipeline.js';
 import { python } from '../server/table-structure.js';
+import { fileURLToPath } from 'node:url';
 
 let failed = false;
 console.log(`Node ${process.version}`);
@@ -21,6 +22,9 @@ for (const [label, command, args] of [
   ['PDF文字', poppler.text, ['-v']],
   ['PDF图像', poppler.render, ['-v']],
   ['PDF信息', poppler.info, ['-v']],
+  ['Skill Python', python(), ['-X', 'utf8', '-c', 'import sys; assert sys.version_info >= (3, 10), "Skill需要Python 3.10+"; print(sys.version.split()[0])']],
+  ['规范脚本', python(), ['-X', 'utf8', fileURLToPath(new URL('../skills/specification-rule-parser/scripts/prepare_pdf.py', import.meta.url)), '--help']],
+  ['图纸脚本', python(), ['-X', 'utf8', fileURLToPath(new URL('../skills/drawing-requirements-matcher/scripts/prepare_pdf.py', import.meta.url)), '--help']],
   ['表格结构', python(), ['-X', 'utf8', '-c', 'import pdfplumber; print("pdfplumber " + pdfplumber.__version__)']],
 ]) {
   try { const r = await runProcess(command, args); console.log(`${label}: ${(r.stdout || r.stderr).trim().split('\n')[0]}`); }

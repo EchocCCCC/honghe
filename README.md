@@ -75,36 +75,36 @@ API增加 `informationSummary`：total为完整资料记录，core为制造＋�
 
 ## Skill附带PDF脚本
 
-PDF预处理脚本随Skill交付，网站后端调用同一模块，命令行也可单独运行：
+两个Skill的预处理脚本全部使用Python，随Skill交付；网站后端启动同一套Python脚本，命令行也可单独运行：
 
 ~~~text
 skills/
   specification-rule-parser/
     SKILL.md
     scripts/
-      prepare-pdf.mjs       规范入口：文字、整图、表格结构
-      pdf-core.mjs          通用文字与图像处理
-      table-structure.mjs   表格结构调用
+      prepare_pdf.py        规范入口：文字、整图、表格结构
+      pdf_core.py           通用文字与图像处理
       table_structure.py    按格线展开合并单元格
-      process.mjs           外部工具执行
-      cli.mjs               命令行参数及输出
+      process.py            外部工具执行
+      cli.py                命令行参数及输出
+      bridge.py             网站调用的JSON接口
       requirements.txt      Python表格依赖
   drawing-requirements-matcher/
     SKILL.md
     scripts/
-      prepare-pdf.mjs       图纸入口：整图及5200像素局部
+      prepare_pdf.py        图纸入口：整图及5200像素局部
 ~~~
 
-两份完整Skill须并列安装；图纸脚本复用规范Skill中的通用引擎。复制这两个目录即可离开网站运行，不依赖server、node_modules、项目package.json或API密钥；仍需安装Node.js和Poppler，规范表格另外需要Python及附带requirements.txt中的包。独立脚本只读取进程环境，不自动加载网站.env，可配置PDFINFO_PATH、PDFTOTEXT_PATH、PDFTOPPM_PATH、PYTHON_PATH。
+两份完整Skill须并列安装；图纸脚本复用规范Skill中的通用引擎。复制这两个目录即可离开网站运行，不依赖Node.js、server、node_modules、项目package.json或API密钥；需要Python 3.10+和Poppler，规范表格另外需要附带requirements.txt中的包。图纸预处理仅使用Python标准库。独立脚本只读取进程环境，不自动加载网站.env，可配置PDFINFO_PATH、PDFTOTEXT_PATH、PDFTOPPM_PATH；网站用PYTHON_PATH选择解释器。网站服务和Pi CLI仍使用Node.js。
 
 ~~~text
-node skills/specification-rule-parser/scripts/prepare-pdf.mjs --input "/data/规范.pdf" --output "/data/规范预处理" --audit-details
-node skills/drawing-requirements-matcher/scripts/prepare-pdf.mjs --input "/data/零件.pdf" --output "/data/图纸预处理"
+python skills/specification-rule-parser/scripts/prepare_pdf.py --input "/data/规范.pdf" --output "/data/规范预处理" --audit-details
+python skills/drawing-requirements-matcher/scripts/prepare_pdf.py --input "/data/零件.pdf" --output "/data/图纸预处理"
 ~~~
 
 输出目录必须为新目录或空目录。输出prepared.json、source.txt、coverage.json和图片；规范还输出table-structure.json。--audit-details补充表格候选/无文字页的高分辨率证据；网站在初提后、查漏前调用同一增强函数。输出是模型输入证据，不能视为已提取的制造要求。
 
-执行分工为“后端或调用方执行Skill脚本 → Pi加载Skill和预处理证据 → Flash提取与复核 → 后端校验并展示”。当前Pi使用--no-tools，加载Skill本身不会自动执行脚本。Skill规定识读、条件、分类和输出，脚本负责确定性的文件处理；本次整理不重新调用模型或改写历史提取结果。
+执行分工为“后端或调用方执行Python Skill脚本 → Pi加载Skill和预处理证据 → Flash提取与复核 → 后端校验并展示”。当前Pi使用--no-tools，加载Skill本身不会自动执行脚本。Skill规定识读、条件、分类和输出，脚本负责确定性的文件处理；语言迁移不重新调用模型或改写历史提取结果。
 
 ## Pi执行与记录
 
