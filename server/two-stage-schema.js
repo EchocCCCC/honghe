@@ -52,6 +52,7 @@ export function verifySources(sources, documents) {
 export function verifyRequirement(item, documents) {
   const sources = verifySources(item.sources, documents);
   const notes = [];
+  if (sources.some(source => documents.find(doc => doc.name === source.file)?.needsVisualReview?.includes(source.page))) notes.push('该页视觉覆盖不完整，请核对原图及局部细节。');
   if (sources.some(s => s.verification === 'visual_review')) notes.push('图像证据待人工核对；已提交模型不等于语义正确。');
   if (sources.some(s => s.verification === 'unmatched_quote')) notes.push('引文未能在文字层定位且该页未提交图像，请核对原件。');
   return { ...item, sources, review_required: item.review_required || notes.length > 0, review_note: appendReviewNotes(item.review_note, notes) };

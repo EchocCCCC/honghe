@@ -4,17 +4,18 @@ import { createHash } from 'node:crypto';
 import { INFORMATION_TYPES, informationSummary } from './information-types.js';
 import { ROOT, MODEL_ID } from './config.js';
 import { runPi } from './pi.js';
-import { prepareDocuments, augmentTableEvidence } from './pdf.js';
+import { augmentTableEvidence } from '../skills/specification-rule-parser/scripts/pdf-core.mjs';
+import { prepareSpecification } from '../skills/specification-rule-parser/scripts/prepare-pdf.mjs';
+import { prepareDrawingDocuments } from '../skills/drawing-requirements-matcher/scripts/prepare-pdf.mjs';
 import { planPageBatches, writeBatchSource, ownsSource, technicalFactKey } from './batches.js';
 import { addNumericCoverageWarnings } from './numeric-coverage.js';
-import { appendTableStructure } from './table-structure.js';
 import { sourceAliases, mapSourceNames, aliasSourceText, applyConservativeDrawingGuards } from './drawing-guards.js';
 import { parseContract, specificationSchema, specificationPatchSchema, verifyRequirement, uniqueIds, validateMatching, applyDrawingPatch } from './two-stage-schema.js';
 
 export const SPEC_SKILL = path.join(ROOT, 'skills/specification-rule-parser');
 export const DRAWING_SKILL = path.join(ROOT, 'skills/drawing-requirements-matcher');
-export const PIPELINE_VERSION = 'two-stage-v4-information-scope';
-export const DRAWING_PIPELINE_VERSION = 'two-stage-v7-information-scope';
+export const PIPELINE_VERSION = 'two-stage-v5-skill-pdf';
+export const DRAWING_PIPELINE_VERSION = 'two-stage-v8-skill-pdf';
 const json = (file, value) => fs.writeFile(file, JSON.stringify(value, null, 2));
 export const digest = value => createHash('sha256').update(value).digest('hex');
 export async function specificationFingerprint(file, parserContent) {
@@ -81,9 +82,8 @@ function coverage(prepared) {
 }
 export async function buildSpecification({ file, directory, skill = SPEC_SKILL, onProgress = () => {}, invoke = runPi }) {
   const fixedSkill = await freezeSkill(skill, directory, 'parser-used.md');
-  const prepared = await prepareDocuments([file], path.join(directory, 'prepared'));
   onProgress('preparing', '读取表格格线与合并单元格边界');
-  await appendTableStructure(prepared, file, directory);
+  const prepared = await prepareSpecification(file, path.join(directory, 'prepared'), { tableDirectory: directory });
   await json(path.join(directory, 'prepared.json'), prepared);
   const batches = planPageBatches(prepared.pages);
   await json(path.join(directory, 'extraction-plan.json'), batches);
@@ -123,7 +123,7 @@ export async function buildSpecification({ file, directory, skill = SPEC_SKILL, 
   return result;
 }
 
-export async function matchDrawing({ file, directory, specificationJob, specificationDirectory, stage = 'all', onProgress = () => {}, invoke = runPi, prepare = prepareDocuments, initialRun, retryId = '' }) {
+export async function matchDrawing({ file, directory, specificationJob, specificationDirectory, stage = 'all', onProgress = () => {}, invoke = runPi, prepare = prepareDrawingDocuments, initialRun, retryId = '' }) {
   const fixedSkill = await freezeSkill(DRAWING_SKILL, directory, 'drawing-skill-used.md');
   const prepared = await prepare([file], path.join(directory, 'prepared'), { detailMode: true });
   await json(path.join(directory, 'prepared.json'), prepared);

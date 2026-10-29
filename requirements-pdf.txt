@@ -1,1 +1,1 @@
-pdfplumber==0.11.9
+-r skills/specification-rule-parser/scripts/requirements.txt

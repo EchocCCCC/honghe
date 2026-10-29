@@ -7,7 +7,6 @@ import { runProcess } from '../server/process.js';
 
 process.env.DEEPSEEK_API_KEY = 'test-local-placeholder';
 const { writePiConfig, runPi } = await import('../server/pi.js');
-const { runExtractionPipeline } = await import('../server/pipeline.js');
 const { config, MODEL_ID, MODELS } = await import('../server/config.js');
 const workRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..', 'work');
 let temporaryRoot;
@@ -34,13 +33,20 @@ test('Pi custom configuration exposes only Flash with image support and an envir
   assert.deepEqual(MODELS, ['deepseek-flash']);
 });
 
-test('Pi and pipeline entry points reject Pro and all other model IDs before creating a run', async () => {
+test('the shared Pi entry point rejects Pro and all other model IDs before creating a run', async () => {
   for (const model of ['deepseek-v4-pro', 'unsupported-test-model']) {
     const directory = path.join(temporaryRoot, model);
     // The absent source is a second barrier: even a guard regression must not
     // reach a provider request in this negative-path test.
     await assert.rejects(runPi({ directory, sourcePath: path.join(directory, 'missing-source.txt'), model, skill: null }), /固定使用.*Flash/);
-    await assert.rejects(runExtractionPipeline({ directory, prepared: {}, model }), /只能使用deepseek-flash/);
+    await assert.rejects(fs.access(directory), { code: 'ENOENT' });
+  }
+});
+
+test('Pi requires an explicit stage skill before creating a run', async () => {
+  for (const skill of [undefined, null, '', '  ']) {
+    const directory = path.join(temporaryRoot, 'missing-skill');
+    await assert.rejects(runPi({ directory, sourcePath: path.join(directory, 'missing-source.txt'), skill }), /必须显式指定.*Skill/);
     await assert.rejects(fs.access(directory), { code: 'ENOENT' });
   }
 });

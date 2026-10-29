@@ -73,6 +73,39 @@ node scripts/classify-existing.js --runtime /absolute/project/runtime
 
 API增加 `informationSummary`：total为完整资料记录，core为制造＋质量，actionable为制造＋质量＋采购，context不计入后两者。旧JSON完整导出可能保留背景记录，并明确标记all_records；新模型的requirements仅允许manufacturing、quality、procurement。规范规则包继续保留背景供图纸匹配理解条件。
 
+## Skill附带PDF脚本
+
+PDF预处理脚本随Skill交付，网站后端调用同一模块，命令行也可单独运行：
+
+~~~text
+skills/
+  specification-rule-parser/
+    SKILL.md
+    scripts/
+      prepare-pdf.mjs       规范入口：文字、整图、表格结构
+      pdf-core.mjs          通用文字与图像处理
+      table-structure.mjs   表格结构调用
+      table_structure.py    按格线展开合并单元格
+      process.mjs           外部工具执行
+      cli.mjs               命令行参数及输出
+      requirements.txt      Python表格依赖
+  drawing-requirements-matcher/
+    SKILL.md
+    scripts/
+      prepare-pdf.mjs       图纸入口：整图及5200像素局部
+~~~
+
+两份完整Skill须并列安装；图纸脚本复用规范Skill中的通用引擎。复制这两个目录即可离开网站运行，不依赖server、node_modules、项目package.json或API密钥；仍需安装Node.js和Poppler，规范表格另外需要Python及附带requirements.txt中的包。独立脚本只读取进程环境，不自动加载网站.env，可配置PDFINFO_PATH、PDFTOTEXT_PATH、PDFTOPPM_PATH、PYTHON_PATH。
+
+~~~text
+node skills/specification-rule-parser/scripts/prepare-pdf.mjs --input "/data/规范.pdf" --output "/data/规范预处理" --audit-details
+node skills/drawing-requirements-matcher/scripts/prepare-pdf.mjs --input "/data/零件.pdf" --output "/data/图纸预处理"
+~~~
+
+输出目录必须为新目录或空目录。输出prepared.json、source.txt、coverage.json和图片；规范还输出table-structure.json。--audit-details补充表格候选/无文字页的高分辨率证据；网站在初提后、查漏前调用同一增强函数。输出是模型输入证据，不能视为已提取的制造要求。
+
+执行分工为“后端或调用方执行Skill脚本 → Pi加载Skill和预处理证据 → Flash提取与复核 → 后端校验并展示”。当前Pi使用--no-tools，加载Skill本身不会自动执行脚本。Skill规定识读、条件、分类和输出，脚本负责确定性的文件处理；本次整理不重新调用模型或改写历史提取结果。
+
 ## Pi执行与记录
 
 `server/pi.js`以参数数组、关闭shell执行锁定版本 `@earendil-works/pi-coding-agent@1.4.0`。两阶段都使用：
@@ -99,7 +132,7 @@ pi -p --mode json --provider deepseek-extract --model deepseek-flash
 - `GET /api/drawing-batches/:id/drawings/:drawingId`：单零件结果；`/file`返回该图纸PDF。
 - `POST /api/drawing-batches/:id/drawings/:drawingId/retry`：只重新核对该零件。正常结束的完整初次JSON可复用，截断初次输出不复用；原结果和失败运行均保留。
 
-旧 `/api/jobs`及旧Skill仅保留历史运行兼容，当前网页走两阶段API。PI_AUTO_REVIEW仅控制旧管线，当前两阶段流程固定执行规范查漏和逐图复核。
+项目仅保留规范解析、图纸匹配两个Skill。旧综合提取Skill、旧执行管线和评估入口已删除；旧 /api/jobs 接口返回410退役提示。现有两阶段流程固定执行规范查漏和逐图复核，已保存的历史资料不删除。
 
 ## 验证与评估
 

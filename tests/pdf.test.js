@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import '../server/config.js';
 import { prepareDocuments, poppler, augmentTableEvidence } from '../server/pdf.js';
 import { runProcess } from '../server/process.js';
 import { appendTableStructure, python } from '../server/table-structure.js';
