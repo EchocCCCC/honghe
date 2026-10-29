@@ -40,7 +40,11 @@ pnpm start
 
 规范解析先用pdfplumber读取向量格线及单元格矩形，按真实矩形覆盖展开合并值；空格不按邻格填充。结构候选与原图共同交给Flash，扫描表格仍依赖视觉识读；不可见/裁字不能因文字层存在而当确定要求。原结构保存在table-structure.json。
 
-规则包保存metadata、rules、warnings及来源覆盖/运行记录；每条规则包含informationType、requirement、strength、conditions、exceptions、overridePolicy、externalReferences、parameters、sources等。完整模型契约写在相应Skill内，后端验证定义在 `server/two-stage-schema.js`。
+规则包保存metadata、rules、warnings及来源覆盖/运行记录。两列交付口径复用现有字段：category为具体的“工艺要求的名称”，requirement为“量化指标”；后者可包含数值、比较符、单位、牌号、状态、禁止项及明确的待确认条件。不增加重复的name/value字段。来源、适用条件、例外与规则关联仍保留在内部，用于核对。
+
+每个Skill只保留一个入口和一份按模式分节的 `references/protocol.md`。后端按规范提取、图纸匹配、复核或旧记录归类选择所需协议章节，与入口组成不可变提示快照；未使用模式不进入本次提示。Pi继续使用--no-tools。输出结构验证在 `server/two-stage-schema.js`。本轮优化Skill及加载，网页仍使用现有详细结果视图。
+
+informationType保留为旧接口兼容字段，其四个值是本项目的展示标记，不是行业工艺分类标准，也不是提取的业务目标。是否提取一条内容，取决于它是否提出有原文依据的制造或检验要求；无数值的禁限、牌号和状态不能漏掉。解释性背景用于理解，采购管理不混入工艺主清单。
 
 逐图传输使用固定来源代号S1/D1，后端精确恢复原文件名后验证；不按相似文件名猜测来源。用户选定的规范版本保持绑定，外部未注日期引用规则不会自动升级当前规范库。
 
@@ -120,7 +124,7 @@ pi -p --mode json --provider deepseek-extract --model deepseek-flash
 
 系统提示使用Skill快照，客户资料只作为待分析数据。Pi无命令/文件/MCP工具；stdin立即关闭，stdout严格按UTF-8及LF解析JSONL，并检查正常结束及完整JSON。每次保存Skill哈希、调用模型、用量及附件数。自定义供应商未配置计价，Pi用量中的cost=0不代表没有API费用，实际费用以供应商账单为准。apiKey只通过子进程环境传入，生成配置使用环境变量引用。
 
-规范文件在 `runtime/specifications/ID/`；图纸批次在 `runtime/drawing-batches/ID/零件ID/`。规则库按原PDF哈希＋解析Skill哈希＋PIPELINE_VERSION复用；修改影响解析的代码时应更新管线版本。已完成规范版本不被后续任务覆盖，换规范必须选择新版本重跑图纸。
+规范文件在 `runtime/specifications/ID/`；图纸批次在 `runtime/drawing-batches/ID/零件ID/`。规范受理时将SKILL.md与references/protocol.md一起冻结为parser-bundle.json；规则库按原PDF哈希＋这两文件的联合哈希＋PIPELINE_VERSION复用。初提与复核分别编译，运行记录保留各自的提示哈希、完整资料包哈希及实际加载章节；不能把两个阶段不同的提示哈希当成缓存错误。修改影响解析的代码时仍须更新管线版本。已完成规范版本不被后续任务覆盖，换规范必须选择新版本重跑图纸。
 
 ## API
 

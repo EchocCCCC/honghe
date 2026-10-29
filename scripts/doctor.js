@@ -1,4 +1,3 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config, safeError } from '../server/config.js';
 import { runProcess } from '../server/process.js';
@@ -7,6 +6,7 @@ import { poppler } from '../server/pdf.js';
 import { SPEC_SKILL, DRAWING_SKILL } from '../server/two-stage-pipeline.js';
 import { python } from '../server/table-structure.js';
 import { fileURLToPath } from 'node:url';
+import { loadSkillBundle } from '../server/skills.js';
 
 let failed = false;
 console.log(`Node ${process.version}`);
@@ -14,7 +14,7 @@ const [major, minor] = process.versions.node.split('.').map(Number);
 if (major < 22 || (major === 22 && minor < 19)) { failed = true; console.error('Pi需要Node >=22.19，请安装Node24 LTS'); }
 console.log(`DeepSeek: ${config.baseUrl} / ${config.model} / 密钥${config.apiKey ? '已配置' : '未配置'}`);
 for (const skill of [SPEC_SKILL, DRAWING_SKILL]) {
-  try { await fs.access(path.join(skill, 'SKILL.md')); console.log(`Skill: ${path.basename(skill)} 就绪`); }
+  try { await loadSkillBundle(skill); console.log(`Skill: ${path.basename(skill)} 入口与协议就绪`); }
   catch { failed = true; console.error(`缺少Skill：${path.basename(skill)}`); }
 }
 for (const [label, command, args] of [

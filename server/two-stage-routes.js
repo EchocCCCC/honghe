@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { ACTIONABLE_TYPES, informationSummary, readInformationView, decorateDispositions } from './information-types.js';
 import { RUNTIME, config, MODEL_ID, safeError } from './config.js';
 import { buildSpecification, matchDrawing, specificationFingerprint, SPEC_SKILL, digest } from './two-stage-pipeline.js';
+import { loadSkillBundle, freezeSkillBundle } from './skills.js';
 
 const terminal = new Set(['completed', 'failed', 'partial']);
 const validId = value => /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
@@ -137,14 +138,14 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
     await previous;
     try {
       if (!uploaded) throw new Error('请选择一份技术规范PDF');
-      const parserContent = await fs.readFile(path.join(SPEC_SKILL, 'SKILL.md'));
-      const fingerprint = await specificationFingerprint(uploaded.path, parserContent);
+      const parserBundle = await loadSkillBundle(SPEC_SKILL);
+      const fingerprint = await specificationFingerprint(uploaded.path, parserBundle);
       const cached = (await allSpecifications()).find(job => job.status !== 'failed' && job.fingerprint && Object.keys(fingerprint).every(k => job.fingerprint[k] === fingerprint[k]));
       if (cached) { await cleanup([uploaded]); return res.status(202).json({ id: cached.id, cached: true }); }
       const id = randomUUID(), target = directory('specifications', id); await fs.mkdir(target, { recursive: true });
       const file = { name: filename(uploaded.originalname), path: path.join(target, 'source.pdf') };
       await fs.rename(uploaded.path, file.path);
-      const skill = path.join(target, 'parser-snapshot.md'); await fs.writeFile(skill, parserContent);
+      const skill = await freezeSkillBundle(parserBundle, path.join(target, 'parser-bundle.json'));
       const job = { id, name: String(req.body.label || file.name).slice(0, 180), file, fingerprint, model: MODEL_ID, status: 'queued', message: '等待建立规范规则库', createdAt: new Date().toISOString() };
       await persist('specifications', job);
       res.status(202).json({ id, cached: false });
@@ -153,7 +154,7 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
           job.status = 'preparing'; job.message = '读取规范全部物理页并生成证据'; await persist('specifications', job);
           job.result = await build({ file, directory: target, skill, onProgress: (status, message) => { job.status = status; job.message = message; } });
           const runs = [...(job.result.run?.extractionRuns || []), ...(job.result.review?.runs || [])];
-          if (runs.some(run => run.skillSha256 !== fingerprint.parserSha256)) throw new Error('规范调用的Skill快照与缓存指纹不一致，拒绝保存为可用规则库');
+          if (runs.some(run => run.skillBundleSha256 !== fingerprint.parserSha256)) throw new Error('规范调用的Skill资料快照与缓存指纹不一致，拒绝保存为可用规则库');
           job.status = 'completed'; job.message = `规范库已建立：${job.result.informationSummary?.core ?? job.result.rules.length}项制造与检验要求，请核对分类与原文疑点`;
         } catch (error) { job.status = 'failed'; job.error = safeError(error); job.message = '规范解析失败，可重新提交'; }
         await persist('specifications', job);

@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { specificationSchema, matchingSchema } from '../server/two-stage-schema.js';
 
 // Use Pi's own installed YAML parser, including under isolated pnpm installs.
 const piRequire = createRequire(import.meta.resolve('@earendil-works/pi-coding-agent'));
@@ -23,9 +24,13 @@ for (const [name, collection] of [['specification-rule-parser', 'rules'], ['draw
     assert.ok(metadata.description.trim().length > 0 && metadata.description.length <= 1024);
     assert.doesNotMatch(metadata.description, /[<>]/);
     assert.doesNotMatch(source, /\b(?:TODO|TBD|FIXME|REPLACE_ME|YOUR_API_KEY)\b|\{\{\s*[A-Z_]+\s*\}\}/);
-    const contracts = [...source.matchAll(/```json\s*([\s\S]*?)```/g)].map(match => JSON.parse(match[1]));
+    const protocol = await fs.readFile(path.join(skillsRoot, name, 'references/protocol.md'), 'utf8');
+    const contracts = [...protocol.matchAll(/```json\s*([\s\S]*?)```/g)].map(match => JSON.parse(match[1]));
     const contract = contracts.find(value => Array.isArray(value[collection]) && value[collection].length);
     assert.ok(contract, 'The skill must provide its structured extraction contract');
+    const schema = collection === 'rules' ? specificationSchema : matchingSchema;
+    const parsed = schema.safeParse(contract);
+    assert.ok(parsed.success, parsed.success ? '' : JSON.stringify(parsed.error.issues));
     assert.ok(Array.isArray(contract.warnings));
     const item = contract[collection][0];
     for (const field of ['id', 'informationType', 'category', 'requirement', 'scope', 'parameters', 'sources', 'review_required', 'review_note']) {

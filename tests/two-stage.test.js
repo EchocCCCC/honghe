@@ -6,6 +6,8 @@ import path from 'node:path';
 import express from 'express';
 import { validateMatching, ruleSchema, applyDrawingPatch } from '../server/two-stage-schema.js';
 import { mergeRules, applyRulePatch, ruleKey, matchDrawing } from '../server/two-stage-pipeline.js';
+import { loadSkillBundle, compileSkill } from '../server/skills.js';
+import { DRAWING_SKILL } from '../server/two-stage-pipeline.js';
 import { createTwoStageRouter, WorkQueue } from '../server/two-stage-routes.js';
 import { sourceAliases, mapSourceNames, guardRegionalWallThickness, guardPressurePurpose, guardDrawingStandardClaims, guardMaterialSectionDimensions } from '../server/drawing-guards.js';
 
@@ -205,9 +207,15 @@ test('planned audit may repair a complete JSON candidate, but invalid audit outp
     let badCalls = 0; const badPatch = auditPatch(); badPatch.replacements = invalid.requirements;
     await assert.rejects(matchDrawing({ file: { name: 'part.pdf' }, directory: failedDir, specificationJob: job, specificationDirectory: root, prepare: async () => structuredClone(prepared), invoke: async () => ({ result: ++badCalls === 1 ? structuredClone(invalid) : badPatch, metadata: {} }) }), /本零件证据/);
     await assert.rejects(fs.access(path.join(failedDir, 'result.json')));
+    const matchingSkill = compileSkill(await loadSkillBundle(DRAWING_SKILL), 'match');
     let retries = 0;
-    const retry = await matchDrawing({ file: { name: 'part.pdf' }, directory: path.join(root, 'retry'), specificationJob: job, specificationDirectory: root, prepare: async () => structuredClone(prepared), initialRun: { result: invalid, metadata: { model: 'deepseek-flash', stopReason: 'stop' } }, retryId: 'test', invoke: async () => { retries++; return { result: auditPatch(), metadata: {} }; } });
+    const retry = await matchDrawing({ file: { name: 'part.pdf' }, directory: path.join(root, 'retry'), specificationJob: job, specificationDirectory: root, prepare: async () => structuredClone(prepared), initialRun: { result: invalid, metadata: { model: 'deepseek-flash', stopReason: 'stop', skillBundleSha256: matchingSkill.bundleSha256, skillSha256: matchingSkill.sha256 } }, retryId: 'test', invoke: async () => { retries++; return { result: auditPatch(), metadata: {} }; } });
     assert.equal(retries, 1); assert.equal(retry.run.reusedMatching, true);
+    let reruns = 0;
+    const stale = await matchDrawing({ file: { name: 'part.pdf' }, directory: path.join(root, 'stale-retry'), specificationJob: job, specificationDirectory: root,
+      prepare: async () => structuredClone(prepared), initialRun: { result: invalid, metadata: { model: 'deepseek-flash', stopReason: 'stop' } },
+      invoke: async () => ({ result: ++reruns === 1 ? matchResult() : auditPatch(), metadata: {} }) });
+    assert.equal(reruns, 2); assert.equal(stale.run.reusedMatching, false);
   } finally {
     assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir())); assert.match(path.basename(root), /^honghe-two-stage-/);
     await fs.rm(root, { recursive: true, force: true });

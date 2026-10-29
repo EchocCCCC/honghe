@@ -1,4 +1,4 @@
 interface:
   display_name: "图纸工艺要求匹配"
-  short_description: "结合规范与单零件图纸，突出制造和质量检验要求，另列采购交付并保留待确认依据"
-  default_prompt: "使用 $drawing-requirements-matcher 结合规范和当前图纸，输出分层的制造、质量检验及采购交付要求。"
+  short_description: "结合规范和当前图纸，落实每个零件的要求名称与指标，保留待确认依据"
+  default_prompt: "使用 $drawing-requirements-matcher 结合规范与当前零件图纸，整理工艺要求的名称和量化指标，保留来源与待确认条件。"

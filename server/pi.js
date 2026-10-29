@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { createHash } from 'node:crypto';
 import { config, MODEL_ID, MODEL_NAME, MODEL_VERSION } from './config.js';
+import { loadSkillBundle, freezeSkillPrompt, verifySkillProvenance } from './skills.js';
 
 export const PI_CLI = fileURLToPath(new URL('./bundle/cli.js', import.meta.resolve('@earendil-works/pi-coding-agent')));
 
@@ -59,11 +60,18 @@ export function createJsonlDecoder(onEvent) {
   };
 }
 
-export async function runPi({ directory, sourcePath, images = [], model = config.model, skill, prompt, onProgress = () => {} }) {
+export async function runPi({ directory, sourcePath, images = [], model = config.model, skill, skillMode, skillProvenance, prompt, onProgress = () => {} }) {
   if (!config.apiKey) throw new Error('请先在本地 .env 配置 DEEPSEEK_API_KEY 并重启服务');
   if (model !== MODEL_ID) throw new Error(`本项目全部阶段固定使用 ${MODEL_NAME}（${MODEL_ID}）`);
   if (typeof skill !== 'string' || !skill.trim()) throw new Error('调用Pi时必须显式指定本阶段的Skill或已保存的Skill快照');
   if (images.length > 12) throw new Error('单次Pi调用图片超过12张，请通过逐页分批管线运行');
+  if (!skillProvenance) {
+    if (!skillMode) throw new Error('调用Pi时必须显式指定Skill任务模式或已编译快照的加载记录');
+    ({ skill, skillProvenance } = await freezeSkillPrompt(await loadSkillBundle(skill), skillMode, directory));
+  } else if (skillMode && skillMode !== skillProvenance.mode) throw new Error('Skill模式与加载记录不一致');
+  const content = await fs.readFile(skill);
+  const loading = verifySkillProvenance(content, skillProvenance);
+  const skillHash = createHash('sha256').update(content).digest('hex');
   const agentDir = path.join(directory, 'pi-config');
   await writePiConfig(agentDir);
   const args = [PI_CLI, '-p', '--mode', 'json', '--provider', 'deepseek-extract', '--model', model,
@@ -71,10 +79,6 @@ export async function runPi({ directory, sourcePath, images = [], model = config
   // Pi prepends @file text before expanding /skill commands, which only expand
   // at the beginning of a prompt. Supplying the skill as the system prompt
   // guarantees its full instructions are present even with all tools disabled.
-  const skillFile = path.extname(skill).toLowerCase() === '.md' ? skill : path.join(skill, 'SKILL.md');
-  await fs.access(skillFile);
-  const content = await fs.readFile(skillFile);
-  const skillHash = createHash('sha256').update(content).digest('hex');
   await fs.writeFile(path.join(directory, 'skill-used.md'), content);
   args.push('--skill', skill, '--system-prompt', path.join(directory, 'skill-used.md'));
   args.push('@' + sourcePath, ...images.map(p => '@' + p));
@@ -112,13 +116,13 @@ export async function runPi({ directory, sourcePath, images = [], model = config
         stream.end(); stderr += stderrDecoder.end();
         if (code !== 0) throw new Error(`Pi 退出码 ${code}：${stderr.slice(-2200)}`);
         const final = events.filter(e => e.type === 'message_end' && e.message?.role === 'assistant').at(-1)?.message;
-        await fs.writeFile(path.join(directory, 'completion-metadata.json'), JSON.stringify({ model, elapsedMs: Date.now() - started, stopReason: final?.stopReason, usage: final?.usage, skillSha256: skillHash, attachedImages: images.length }, null, 2));
+        await fs.writeFile(path.join(directory, 'completion-metadata.json'), JSON.stringify({ model, elapsedMs: Date.now() - started, stopReason: final?.stopReason, usage: final?.usage, skillSha256: skillHash, skillBundleSha256: loading.bundleSha256, skillMode: loading.mode, attachedImages: images.length }, null, 2));
         if (final && final.stopReason !== 'stop') {
           const partial = (final.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
           await fs.writeFile(path.join(directory, 'incomplete-output.txt'), partial);
         }
         const parsed = parseAssistantEvents(events);
-        const metadata = { model, modelLabel: MODEL_NAME, documentedModelVersion: MODEL_VERSION, versionNote: '版本依据2026-10-28官方映射；API别名并非不可变快照', providerReportedModel: parsed.model, elapsedMs: Date.now() - started, protocolEvents: lines, usage: parsed.usage, stopReason: parsed.stopReason, piVersion: '1.4.0', skill: path.basename(skill), skillSha256: skillHash, attachedImages: images.length };
+        const metadata = { model, modelLabel: MODEL_NAME, documentedModelVersion: MODEL_VERSION, versionNote: '版本依据2026-10-28官方映射；API别名并非不可变快照', providerReportedModel: parsed.model, elapsedMs: Date.now() - started, protocolEvents: lines, usage: parsed.usage, stopReason: parsed.stopReason, piVersion: '1.4.0', skill: loading.name, skillSha256: skillHash, skillBundleSha256: loading.bundleSha256, skillMode: loading.mode, skillLoading: loading, attachedImages: images.length };
         await fs.writeFile(path.join(directory, 'model-result.json'), JSON.stringify(parsed.result, null, 2));
         await fs.writeFile(path.join(directory, 'run-metadata.json'), JSON.stringify(metadata, null, 2));
         resolve({ ...parsed, metadata });

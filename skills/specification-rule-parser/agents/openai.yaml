@@ -1,4 +1,4 @@
 interface:
   display_name: "技术规范规则解析"
-  short_description: "区分制造约束、质量检验、采购交付与背景，保留条件和证据，不以条目总数冒充工艺数"
-  default_prompt: "使用 $specification-rule-parser 解析技术规范，按四类信息层次建立可复用、可追溯的记录。"
+  short_description: "提取规范中的名称、指标和适用条件，保留证据，供多张零件图纸复用"
+  default_prompt: "使用 $specification-rule-parser 提取规范中的要求名称、指标、条件及来源，供关联图纸复用。"
