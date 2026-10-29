@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import { normalizeEvidence } from './validation.js';
+import { INFORMATION_TYPES, ACTIONABLE_TYPES, informationSummary } from './information-types.js';
 
 export const sourceSchema = z.object({ file: z.string().min(1), page: z.number().int().positive(), section: z.string().default(''), quote: z.string().min(1) });
 const parameters = z.array(z.object({ name: z.string(), value: z.union([z.string(), z.number()]).transform(String), unit: z.string() }));
 export const requirementSchema = z.object({
-  id: z.string().min(1), category: z.string().min(1), requirement: z.string().min(1), scope: z.string(),
+  id: z.string().min(1), informationType: z.enum(INFORMATION_TYPES), category: z.string().min(1), requirement: z.string().min(1), scope: z.string(),
   parameters, sources: z.array(sourceSchema).min(1), review_required: z.boolean(), review_note: z.string(),
 });
 export const ruleSchema = requirementSchema.extend({
@@ -22,7 +23,7 @@ export const matchingSchema = z.object({
     airtightness: z.enum(['required', 'not_required', 'unspecified']), dimensionState: z.enum(['before_finish', 'after_finish', 'unspecified']),
     references: z.array(z.string()).default([]), facts: z.array(z.object({ name: z.string(), value: z.string(), sources: z.array(sourceSchema).min(1) })).default([]), uncertainties: z.array(z.string()).default([]),
   }), summary: z.string().default(''),
-  requirements: z.array(requirementSchema.extend({ origin: z.enum(['drawing', 'specification', 'combined']), ruleIds: z.array(z.string()) })).min(1).max(2000),
+  requirements: z.array(requirementSchema.extend({ informationType: z.enum(ACTIONABLE_TYPES), origin: z.enum(['drawing', 'specification', 'combined']), ruleIds: z.array(z.string()) })).min(1).max(2000),
   dispositions: z.array(z.object({ ruleId: z.string(), status: z.enum(['applicable', 'not_applicable', 'overridden', 'needs_confirmation']), reason: z.string().min(1), evidence: z.array(sourceSchema).min(1) })),
   warnings: z.array(z.string()).default([]),
 });
@@ -119,12 +120,14 @@ export function validateMatching(raw, specification, drawingPrepared, specPrepar
     if (disposition.status === 'overridden' && (!disposition.evidence.some(s => drawingNames.has(s.file)) || !disposition.evidence.some(s => specNames.has(s.file)))) throw new Error(`覆盖处置缺少规范和本图双方证据：${disposition.ruleId}`);
     dispositions.set(disposition.ruleId, disposition);
   }
-  const missing = specification.rules.filter(r => !dispositions.has(r.id));
+  const actionable = specification.rules.filter(r => r.informationType !== 'context');
+  const missing = actionable.filter(r => !dispositions.has(r.id));
   if (missing.length) throw new Error(`规则没有适用性结论：${missing.slice(0, 8).map(r => r.id).join('、')}（共${missing.length}条）`);
   result.requirements = result.requirements.map(item => {
     let checked = verifyRequirement(item, documents);
     for (const id of item.ruleIds) {
       if (!rules.has(id)) throw new Error(`要求引用未知规则：${id}`);
+      if (rules.get(id).informationType === 'context') throw new Error(`背景定义或导航不能进入有效要求：${item.id}/${id}`);
       if (dispositions.get(id).status === 'not_applicable') throw new Error(`不适用规则进入了本零件有效清单：${id}`);
       linked.add(id);
     }
@@ -139,14 +142,16 @@ export function validateMatching(raw, specification, drawingPrepared, specPrepar
     if (uncertain) checked = { ...checked, review_required: true, review_note: appendReviewNotes(checked.review_note, ['关联规则或适用条件尚待确认。']) };
     return checked;
   });
-  const unlinked = result.dispositions.filter(d => d.status !== 'not_applicable' && !linked.has(d.ruleId));
+  const unlinked = result.dispositions.filter(d => rules.get(d.ruleId).informationType !== 'context' && d.status !== 'not_applicable' && !linked.has(d.ruleId));
   if (unlinked.length) throw new Error(`已判适用/覆盖/待确认的规则缺少要求条目：${unlinked.slice(0, 8).map(d => d.ruleId).join('、')}`);
   result.drawing.facts = result.drawing.facts.map(f => {
     if (f.sources.some(s => !drawingNames.has(s.file))) throw new Error(`零件身份事实不能从通用规范取值：${f.name}`);
     return { ...f, sources: verifySources(f.sources, documents) };
   });
-  const counts = status => result.dispositions.filter(d => d.status === status).length;
-  result.ruleCoverage = { total: rules.size, decided: dispositions.size, applicable: counts('applicable'), notApplicable: counts('not_applicable'), overridden: counts('overridden'), needsConfirmation: counts('needs_confirmation'), note: '处置完整仅表示每条规范规则已有结论，不代表判定正确或图纸没有漏项。' };
+  const operativeDispositions = result.dispositions.filter(d => rules.get(d.ruleId).informationType !== 'context');
+  const counts = status => operativeDispositions.filter(d => d.status === status).length;
+  result.ruleCoverage = { total: actionable.length, decided: operativeDispositions.length, backgroundRecords: rules.size - actionable.length, applicable: counts('applicable'), notApplicable: counts('not_applicable'), overridden: counts('overridden'), needsConfirmation: counts('needs_confirmation'), note: '仅对非背景要求统计处置；背景定义和引用关系用于判断，不计入有效要求。处置完整不代表语义正确。' };
+  result.informationSummary = informationSummary(result.requirements);
   result.documents = documents.map(({ name, pages }) => ({ name, pages, role: drawingNames.has(name) ? 'drawing' : 'specification' }));
   return result;
 }

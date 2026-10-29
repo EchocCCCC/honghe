@@ -24,7 +24,7 @@ export function aliasSourceText(text, aliases) {
 // NDT thickness bands conditional; overall/step/groove dimensions cannot confirm them.
 export function guardRegionalWallThickness(result, specification) {
   const rules = new Map(specification.rules.map(r => [r.id, r]));
-  const guarded = new Set(specification.rules.filter(r => /内部质量/.test(r.category) && /壁厚/.test([r.requirement, r.scope, ...r.conditions, ...r.parameters.map(p => p.name)].join(' '))).map(r => r.id));
+  const guarded = new Set(specification.rules.filter(r => r.informationType !== 'context' && /内部质量/.test(r.category) && /壁厚/.test([r.requirement, r.scope, ...r.conditions, ...r.parameters.map(p => p.name)].join(' '))).map(r => r.id));
   const active = new Set(result.dispositions.filter(d => guarded.has(d.ruleId) && d.status !== 'not_applicable').map(d => d.ruleId));
   if (!active.size) return { result, changes: [] };
   const note = '受检区域的局部壁厚未经人工确认，内部质量分档待确认；总高、台阶高、槽尺寸等不自动作为局部壁厚。';
@@ -38,7 +38,7 @@ export function guardRegionalWallThickness(result, specification) {
       let id = index === 0 ? item.id : `${item.id}-C${index + 1}`;
       while (index > 0 && seen.has(id)) id += 'C'; seen.add(id);
       const pending = active.has(rule.id);
-      requirements.push({ id, category: rule.category, requirement: pending ? `条件要求（未确定适用分档）：${rule.requirement}` : rule.requirement,
+      requirements.push({ id, informationType: rule.informationType, category: rule.category, requirement: pending ? `条件要求（未确定适用分档）：${rule.requirement}` : rule.requirement,
         scope: pending ? `${rule.scope}；${note}` : rule.scope, parameters: structuredClone(rule.parameters), sources: structuredClone(rule.sources),
         review_required: pending || rule.review_required, review_note: pending ? note : rule.review_note, origin: 'specification', ruleIds: [rule.id] });
     }
@@ -56,7 +56,7 @@ const leakagePressure = /(?:(?:气密(?:性)?(?:试验|检验)|泄漏(?:试验|�
 export function guardPressurePurpose(result, specification, drawingPrepared) {
   const drawingFiles = new Set(drawingPrepared.documents.map(d => d.name));
   const rules = new Map(specification.rules.map(r => [r.id, r]));
-  const pressureRules = new Set(specification.rules.filter(r => /气密|沉水|泄漏/.test(r.requirement) && /压力|MPa|kPa|bar/.test(r.requirement + JSON.stringify(r.parameters))).map(r => r.id));
+  const pressureRules = new Set(specification.rules.filter(r => r.informationType !== 'context' && /气密|沉水|泄漏/.test(r.requirement) && /压力|MPa|kPa|bar/.test(r.requirement + JSON.stringify(r.parameters))).map(r => r.id));
   const sources = [...result.requirements.flatMap(r => r.sources), ...result.drawing.facts.flatMap(f => f.sources)].filter(s => drawingFiles.has(s.file));
   const drawingText = [...drawingPrepared.documents.flatMap(d => d.textPages || []), ...sources.map(s => s.quote)].join('\n');
   if (!proofPressure.test(drawingText) || leakagePressure.test(drawingText)) return { result, changes: [] };
@@ -72,7 +72,7 @@ export function guardPressurePurpose(result, specification, drawingPrepared) {
       const rule = rules.get(ruleId), pending = active.has(ruleId);
       let id = index === 0 ? item.id : `${item.id}-P${index + 1}`;
       while (index > 0 && seen.has(id)) id += 'P'; seen.add(id);
-      requirements.push({ id, category: rule.category, requirement: pending ? `条件要求（试验用途与适用关系未确认，不确定执行压力）：${rule.requirement}` : rule.requirement,
+      requirements.push({ id, informationType: rule.informationType, category: rule.category, requirement: pending ? `条件要求（试验用途与适用关系未确认，不确定执行压力）：${rule.requirement}` : rule.requirement,
         scope: pending ? `${rule.scope}；${note}` : rule.scope, parameters: structuredClone(rule.parameters), sources: structuredClone(rule.sources),
         review_required: pending || rule.review_required, review_note: pending ? note : rule.review_note, origin: 'specification', ruleIds: [ruleId] });
     }
@@ -111,7 +111,7 @@ export function guardDrawingStandardClaims(result, drawingPrepared) {
 // Finished local geometry is not a confirmed raw-stock nominal section size.
 export function guardMaterialSectionDimensions(result, specification) {
   const rules = new Map(specification.rules.map(r => [r.id, r]));
-  const dimensional = new Set(specification.rules.filter(r => /力学性能/.test(r.category) && /厚度|壁厚|直径/.test([r.requirement, r.scope, ...r.conditions, ...r.parameters.map(p => p.name)].join(' '))).map(r => r.id));
+  const dimensional = new Set(specification.rules.filter(r => r.informationType !== 'context' && /力学性能/.test(r.category) && /厚度|壁厚|直径/.test([r.requirement, r.scope, ...r.conditions, ...r.parameters.map(p => p.name)].join(' '))).map(r => r.id));
   const active = new Set(result.dispositions.filter(d => dimensional.has(d.ruleId) && d.status !== 'not_applicable').map(d => d.ruleId));
   if (!active.size) return { result, changes: [] };
   const note = '原材料公称厚度/直径及材料形态未由人工确认；成品局部厚度、沉孔深度、台阶或其他加工尺寸不能作为原材料尺寸选力学性能档。保留规范候选分档条件待确认。';
@@ -131,7 +131,7 @@ export function guardMaterialSectionDimensions(result, specification) {
       const rule = rules.get(ruleId), pending = active.has(ruleId);
       let id = index === 0 ? item.id : `${item.id}-M${index + 1}`;
       while (index > 0 && seen.has(id)) id += 'M'; seen.add(id);
-      requirements.push({ id, category: rule.category, requirement: pending ? `条件要求（原材料尺寸分档未确认）：${rule.requirement}` : rule.requirement,
+      requirements.push({ id, informationType: rule.informationType, category: rule.category, requirement: pending ? `条件要求（原材料尺寸分档未确认）：${rule.requirement}` : rule.requirement,
         scope: pending ? `${rule.scope}；${note}` : rule.scope, parameters: structuredClone(rule.parameters), sources: structuredClone(rule.sources),
         review_required: pending || rule.review_required, review_note: pending ? note : rule.review_note, origin: 'specification', ruleIds: [ruleId] });
     }

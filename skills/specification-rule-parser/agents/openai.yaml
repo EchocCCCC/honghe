@@ -1,4 +1,4 @@
 interface:
   display_name: "技术规范规则解析"
-  short_description: "解析采购技术规范中的条件、限值、例外和检验要求，建立带证据的规则库"
-  default_prompt: "使用 $specification-rule-parser 将技术规范解析为可复用、可追溯的规则库。"
+  short_description: "区分制造约束、质量检验、采购交付与背景，保留条件和证据，不以条目总数冒充工艺数"
+  default_prompt: "使用 $specification-rule-parser 解析技术规范，按四类信息层次建立可复用、可追溯的记录。"

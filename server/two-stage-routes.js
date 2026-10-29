@@ -3,6 +3,7 @@ import multer from 'multer';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { ACTIONABLE_TYPES, informationSummary, readInformationView, decorateDispositions } from './information-types.js';
 import { RUNTIME, config, MODEL_ID, safeError } from './config.js';
 import { buildSpecification, matchDrawing, specificationFingerprint, SPEC_SKILL, digest } from './two-stage-pipeline.js';
 
@@ -61,18 +62,33 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
     const found = await Promise.all(dirs.filter(validId).map(id => find('specifications', id)));
     return found.filter(Boolean).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
-  function publicSpecification(job, detail = true) {
+  async function publicSpecification(job, detail = true) {
     const { file, fingerprint, ...publicJob } = job;
+    const view = await readInformationView(root, job.result);
+    if (view) {
+      publicJob.informationSummary = view.informationSummary;
+      publicJob.classification = view.classification;
+      publicJob.ruleCount = view.informationSummary.actionable;
+      publicJob.recordCount = view.informationSummary.total;
+      if (job.status === 'completed') publicJob.message = `制造与检验${view.informationSummary.core}项；采购交付${view.informationSummary.procurement}项；背景说明${view.informationSummary.context}项${view.informationSummary.unclassified ? `；未归类${view.informationSummary.unclassified}项` : ''}`;
+    }
     if (!detail) {
       delete publicJob.result;
       publicJob.metadata = job.result?.metadata;
-      publicJob.ruleCount = job.result?.rules.length || 0;
+      publicJob.ruleCount ??= 0;
+      publicJob.recordCount ??= 0;
       publicJob.warningsCount = job.result?.warnings.length || 0;
-    }
+    } else if (view) publicJob.result = view;
     return { ...publicJob, sourceSha256: fingerprint?.sourceSha256 };
   }
-  function publicBatch(job) {
-    return { ...job, drawings: job.drawings.map(({ file, ...drawing }) => drawing) };
+  async function publicBatch(job) {
+    const spec = await find('specifications', job.specificationId);
+    const specification = await readInformationView(root, spec?.result);
+    return { ...job, ...(specification ? { specification: { ...job.specification, informationSummary: specification.informationSummary, ruleCount: specification.informationSummary.actionable, recordCount: specification.informationSummary.total } } : {}), drawings: await Promise.all(job.drawings.map(async ({ file, ...drawing }) => {
+      if (!drawing.result) return drawing;
+      const result = decorateDispositions(await readInformationView(root, drawing.result), specification);
+      return { ...drawing, result, ...(drawing.status === 'completed' ? { message: `完成：制造与检验${result.informationSummary.core}项；采购交付${result.informationSummary.procurement}项；背景说明${result.informationSummary.context}项` } : {}) };
+    })) };
   }
   function requireService(req, res, next) {
     if (!configured()) return res.status(503).json({ error: '请在本地 .env 配置 DEEPSEEK_API_KEY 并重启' });
@@ -98,10 +114,12 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
         if (options.reuseMatching) {
           try {
             const metadata = JSON.parse(await fs.readFile(path.join(child, 'matching/run-metadata.json'), 'utf8'));
-            if (metadata.stopReason === 'stop' && metadata.model === MODEL_ID) initialRun = { metadata, result: JSON.parse(await fs.readFile(path.join(child, 'matching/model-result.json'), 'utf8')) };
+            const candidate = JSON.parse(await fs.readFile(path.join(child, 'matching/model-result.json'), 'utf8'));
+            if (metadata.stopReason === 'stop' && metadata.model === MODEL_ID && candidate.requirements?.length && candidate.requirements.every(item => ACTIONABLE_TYPES.includes(item.informationType))) initialRun = { metadata, result: candidate };
           } catch { /* An incomplete initial generation is rerun, never repaired as JSON. */ }
         }
-        drawing.result = await match({ file: drawing.file, directory: child, specificationJob: spec, specificationDirectory: directory('specifications', spec.id), stage: job.stage,
+        const specificationView = await readInformationView(root, spec.result);
+        drawing.result = await match({ file: drawing.file, directory: child, specificationJob: { ...spec, result: specificationView }, specificationDirectory: directory('specifications', spec.id), stage: job.stage,
           initialRun, retryId: options.retryId || '', onProgress: (status, message) => { drawing.status = status; drawing.message = message; job.message = `${job.drawings.filter(d => d.status === 'completed').length}/${job.drawings.length}个零件完成；${drawing.name}：${message}`; } });
         drawing.status = 'completed'; drawing.message = `完成：${drawing.result.requirements.length}条要求`; delete drawing.error;
       } catch (error) { drawing.status = 'failed'; drawing.error = safeError(error); drawing.message = '本零件处理失败；其他零件继续'; }
@@ -111,7 +129,7 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
       await persist('drawing-batches', job);
     });
   }
-  router.get('/specifications', async (_req, res) => res.json({ specifications: (await allSpecifications()).map(job => publicSpecification(job, false)) }));
+  router.get('/specifications', async (_req, res) => res.json({ specifications: await Promise.all((await allSpecifications()).map(job => publicSpecification(job, false))) }));
   router.post('/specifications', requireService, receive('spec'), async (req, res, next) => {
     const uploaded = req.file;
     const previous = specificationAdmission; let unlock;
@@ -136,7 +154,7 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
           job.result = await build({ file, directory: target, skill, onProgress: (status, message) => { job.status = status; job.message = message; } });
           const runs = [...(job.result.run?.extractionRuns || []), ...(job.result.review?.runs || [])];
           if (runs.some(run => run.skillSha256 !== fingerprint.parserSha256)) throw new Error('规范调用的Skill快照与缓存指纹不一致，拒绝保存为可用规则库');
-          job.status = 'completed'; job.message = `规范库已建立：${job.result.rules.length}条规则，请核对原文疑点`;
+          job.status = 'completed'; job.message = `规范库已建立：${job.result.informationSummary?.core ?? job.result.rules.length}项制造与检验要求，请核对分类与原文疑点`;
         } catch (error) { job.status = 'failed'; job.error = safeError(error); job.message = '规范解析失败，可重新提交'; }
         await persist('specifications', job);
       });
@@ -146,7 +164,7 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
   router.get('/specifications/:id', async (req, res) => {
     const job = await find('specifications', req.params.id);
     if (!job) return res.status(404).json({ error: '规范不存在' });
-    res.json(publicSpecification(job));
+    res.json(await publicSpecification(job));
   });
   router.get('/specifications/:id/file', async (req, res) => {
     const job = await find('specifications', req.params.id);
@@ -172,7 +190,9 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
         await fs.rename(uploaded.path, file.path);
         drawings.push({ id: drawingId, name: names[index], file, sourceSha256: digest(await fs.readFile(file.path)), status: 'queued', message: '等待处理本零件' });
       }
-      const job = { id, specificationId: spec.id, specification: { id: spec.id, metadata: spec.result.metadata, ruleCount: spec.result.rules.length }, model: MODEL_ID, stage, status: 'queued', message: `${drawings.length}个零件等待处理`, drawings, createdAt: new Date().toISOString() };
+      const specificationView = await readInformationView(root, spec.result);
+      const counts = informationSummary(specificationView.rules);
+      const job = { id, specificationId: spec.id, specification: { id: spec.id, metadata: spec.result.metadata, ruleCount: counts.actionable, recordCount: counts.total }, model: MODEL_ID, stage, status: 'queued', message: `${drawings.length}个零件等待处理`, drawings, createdAt: new Date().toISOString() };
       await persist('drawing-batches', job); res.status(202).json({ id });
       for (const drawing of drawings) enqueueDrawing(job, drawing, spec);
     } catch (error) { await cleanup(files); next(error); }
@@ -180,7 +200,7 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
   router.get('/drawing-batches/:id', async (req, res) => {
     const job = await find('drawing-batches', req.params.id);
     if (!job) return res.status(404).json({ error: '图纸批次不存在' });
-    res.json(publicBatch(job));
+    res.json(await publicBatch(job));
   });
   router.post('/drawing-batches/:id/drawings/:drawingId/retry', requireService, async (req, res, next) => {
     const admission = `${req.params.id}/${req.params.drawingId}`;
@@ -207,7 +227,7 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
   router.get('/drawing-batches/:id/drawings/:drawingId', async (req, res) => {
     const job = await find('drawing-batches', req.params.id), drawing = job?.drawings.find(d => d.id === req.params.drawingId);
     if (!drawing) return res.status(404).json({ error: '零件不存在' });
-    const { file, ...publicDrawing } = drawing; res.json(publicDrawing);
+    const view = await publicBatch(job); res.json(view.drawings.find(item => item.id === drawing.id));
   });
   router.get('/drawing-batches/:id/drawings/:drawingId/file', async (req, res) => {
     const job = await find('drawing-batches', req.params.id), drawing = job?.drawings.find(d => d.id === req.params.drawingId);

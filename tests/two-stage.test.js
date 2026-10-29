@@ -10,7 +10,7 @@ import { createTwoStageRouter, WorkQueue } from '../server/two-stage-routes.js';
 import { sourceAliases, mapSourceNames, guardRegionalWallThickness, guardPressurePurpose, guardDrawingStandardClaims, guardMaterialSectionDimensions } from '../server/drawing-guards.js';
 
 const evidence = (file = 'spec.pdf', page = 1) => ({ file, page, section: '3.1', quote: 'test requirement' });
-const base = (id = 'R001', file = 'spec.pdf') => ({ id, category: '检验', requirement: 'test requirement', scope: 'conditional', parameters: [], sources: [evidence(file)], review_required: false, review_note: '' });
+const base = (id = 'R001', file = 'spec.pdf') => ({ id, informationType: 'quality', category: '检验', requirement: 'test requirement', scope: 'conditional', parameters: [], sources: [evidence(file)], review_required: false, review_note: '' });
 const rule = id => ({ ...base(id), strength: 'required', conditions: ['when applicable'], exceptions: [], overridePolicy: 'drawing priority', externalReferences: [] });
 const doc = name => ({ name, pages: 1, textPages: ['test requirement'], imagePages: [1], needsVisualReview: [] });
 const specPrepared = { documents: [doc('spec.pdf')] }, drawingPrepared = { documents: [doc('part.pdf')] };
@@ -50,7 +50,7 @@ test('unresolved rule ambiguity propagates to the linked requirement', () => {
   assert.equal(result.ruleCoverage.decided, 1);
 });
 test('missing condition and exception fields cannot silently become unconditional rules', () => {
-  for (const field of ['conditions', 'exceptions', 'overridePolicy', 'externalReferences', 'parameters', 'review_required']) {
+  for (const field of ['informationType', 'conditions', 'exceptions', 'overridePolicy', 'externalReferences', 'parameters', 'review_required']) {
     const raw = rule('R001'); delete raw[field];
     assert.equal(ruleSchema.safeParse(raw).success, false, field);
   }
