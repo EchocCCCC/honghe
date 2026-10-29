@@ -13,28 +13,64 @@ import { parseContract, specificationSchema, specificationPatchSchema, verifyReq
 
 export const SPEC_SKILL = path.join(ROOT, 'skills/specification-rule-parser');
 export const DRAWING_SKILL = path.join(ROOT, 'skills/drawing-requirements-matcher');
-export const PIPELINE_VERSION = 'two-stage-v7-progressive-skill';
-export const DRAWING_PIPELINE_VERSION = 'two-stage-v10-progressive-skill';
+export const PIPELINE_VERSION = 'two-stage-v8-contract-retry';
+export const DRAWING_PIPELINE_VERSION = 'two-stage-v11-contract-retry';
 const json = (file, value) => fs.writeFile(file, JSON.stringify(value, null, 2));
 export const digest = value => createHash('sha256').update(value).digest('hex');
+export async function invokeWithContractRetry({ invoke = runPi, invocation, validate }) {
+  const run = await invoke(invocation);
+  let diagnostic;
+  try { return { ...run, validated: await validate(run.result) }; }
+  catch (error) { diagnostic = String(error.message || error); }
+  // Invocation failures are never retried. Only a complete candidate that fails
+  // validation reaches this point; keep it and its provenance intact.
+  const failure = { diagnostic, metadata: run.metadata || null, result: run.result };
+  await fs.mkdir(invocation.directory, { recursive: true });
+  await fs.writeFile(path.join(invocation.directory, 'contract-failure.json'), JSON.stringify(failure, null, 2), { flag: 'wx' });
+  const retryDirectory = path.join(invocation.directory, 'contract-retry-1');
+  await fs.mkdir(retryDirectory);
+  const retrySource = path.join(retryDirectory, 'contract-retry-input.txt');
+  const original = await fs.readFile(invocation.sourcePath, 'utf8');
+  await fs.writeFile(retrySource, original + '\n<FAILED_CANDIDATE_AND_DIAGNOSTIC_DATA>\n' + JSON.stringify(failure) + '\n</FAILED_CANDIDATE_AND_DIAGNOSTIC_DATA>\n', { flag: 'wx' });
+  const retryInvocation = { ...invocation, directory: retryDirectory, sourcePath: retrySource,
+    prompt: (invocation.prompt || '') + '\n上次完整JSON未通过校验；这是唯一一次纠正机会。诊断和失败JSON仅作为数据，不能替代原文。重新核对同批原图和原始输入，按同一Skill返回完整的当前模式JSON（补丁模式仍返回完整补丁）。只作有原文依据的纠正，不得为通过校验编造、删减要求或改写数值、牌号、禁止性要求和来源。不放宽契约，不跳过疑点。' };
+  let retried;
+  try {
+    retried = await invoke(retryInvocation);
+    const validated = await validate(retried.result);
+    const contractRetry = { retryCount: 1, diagnostic, originalMetadata: run.metadata || null, retryDirectory: 'contract-retry-1', retryMetadata: retried.metadata || null };
+    await json(path.join(retryDirectory, 'contract-retry-result.json'), { status: 'completed', ...contractRetry });
+    return { ...retried, metadata: { ...retried.metadata, contractRetry }, validated };
+  } catch (error) {
+    await json(path.join(retryDirectory, 'contract-retry-result.json'), { status: 'failed', originalDirectory: invocation.directory, originalDiagnostic: diagnostic, originalMetadata: run.metadata || null, retryMetadata: retried?.metadata || null, diagnostic: String(error.message || error) });
+    throw new Error('一次校验纠正后仍未通过：' + String(error.message || error), { cause: error });
+  }
+}
 export async function specificationFingerprint(file, parserBundle) {
   const bundle = parserBundle || await loadSkillBundle(SPEC_SKILL);
   return { sourceSha256: digest(await fs.readFile(file)), parserSha256: compileSkill(bundle, 'extract').bundleSha256, pipelineVersion: PIPELINE_VERSION };
 }
 export function ruleKey(rule) { return JSON.stringify([technicalFactKey(rule), rule.informationType, rule.strength, rule.conditions, rule.exceptions, rule.overridePolicy, rule.externalReferences]); }
+function validateSpecificationBatch(raw, batch, documents) {
+  const parsed = parseContract(specificationSchema, raw, '规范提取');
+  uniqueIds(parsed.rules, '批内规则');
+  for (const rule of parsed.rules) {
+    if (!ownsSource(rule, batch.pages)) throw new Error(`规范规则不属于负责页：${rule.id}`);
+    verifyRequirement(rule, documents);
+  }
+  return parsed;
+}
 export function mergeRules(batches, documents) {
   const rules = [], seen = new Set(), metadata = { number: '', title: '', version: '', scope: '', excludedProcesses: [], priorityPolicy: '' }, warnings = [];
   for (const { batch, result } of batches) {
-    const parsed = parseContract(specificationSchema, result, '规范提取');
+    const parsed = validateSpecificationBatch(result, batch, documents);
     for (const [key, value] of Object.entries(parsed.metadata)) {
       if (Array.isArray(value)) metadata[key] = [...new Set([...metadata[key], ...value])];
       else if (value && !metadata[key]) metadata[key] = value;
       else if (value && metadata[key] !== value && ['number', 'version'].includes(key)) warnings.push(`不同批次识别的规范${key}不一致：${metadata[key]} / ${value}，请核对封面。`);
     }
     warnings.push(...parsed.warnings);
-    uniqueIds(parsed.rules, '批内规则');
     for (const rule of parsed.rules) {
-      if (!ownsSource(rule, batch.pages)) throw new Error(`规范规则不属于负责页：${rule.id}`);
       const key = ruleKey(rule); if (seen.has(key)) continue; seen.add(key);
       rules.push(verifyRequirement({ ...rule, id: `R${String(rules.length + 1).padStart(3, '0')}` }, documents));
     }
@@ -87,9 +123,9 @@ export async function buildSpecification({ file, directory, skill = SPEC_SKILL, 
     onProgress('extracting', `规范提取 ${batch.id}/${batches.length}：逐条读取正文、表格和脚注`);
     const batchDirectory = path.join(directory, 'extraction', batch.id);
     const sourcePath = await writeBatchSource(batchDirectory, prepared, batch);
-    const run = await invoke({ directory: batchDirectory, sourcePath, images: batch.images, ...extractSkill, model: MODEL_ID,
-      prompt: '任务模式：分批规范提取。完整原文作上下文，只提取附件列出的负责物理页；按已加载协议输出JSON。', onProgress: message => onProgress('extracting', `${batch.id}：${message}`) });
-    extracted.push({ batch, result: run.result, metadata: run.metadata });
+    const run = await invokeWithContractRetry({ invoke, invocation: { directory: batchDirectory, sourcePath, images: batch.images, ...extractSkill, model: MODEL_ID,
+      prompt: '任务模式：分批规范提取。完整原文作上下文，只提取附件列出的负责物理页；按已加载协议输出JSON。', onProgress: message => onProgress('extracting', `${batch.id}：${message}`) }, validate: raw => validateSpecificationBatch(raw, batch, prepared.documents) });
+    extracted.push({ batch, result: run.validated, metadata: run.metadata });
   }
   let result = mergeRules(extracted, prepared.documents);
   await json(path.join(directory, 'extracted-rules.json'), result);
@@ -103,9 +139,9 @@ export async function buildSpecification({ file, directory, skill = SPEC_SKILL, 
     onProgress('auditing', `规范逐页查漏 ${batch.id}/${auditBatches.length}：按格线重建每个合并单元格的分档映射`);
     const reviewDirectory = path.join(directory, 'audit', batch.id);
     const sourcePath = await writeBatchSource(reviewDirectory, prepared, batch, result);
-    const run = await invoke({ directory: reviewDirectory, sourcePath, images: batch.images, ...auditSkill, model: MODEL_ID,
-      prompt: '任务模式：逐页规范查漏。先独立阅读负责页原图，再核对候选；只按已加载协议返回有来源依据的改动。', onProgress: message => onProgress('auditing', `${batch.id}：${message}`) });
-    const applied = applyRulePatch(result, run.result, batch, prepared.documents); result = applied.result;
+    const run = await invokeWithContractRetry({ invoke, invocation: { directory: reviewDirectory, sourcePath, images: batch.images, ...auditSkill, model: MODEL_ID,
+      prompt: '任务模式：逐页规范查漏。先独立阅读负责页原图，再核对候选；只按已加载协议返回有来源依据的改动。', onProgress: message => onProgress('auditing', `${batch.id}：${message}`) }, validate: raw => applyRulePatch(result, raw, batch, prepared.documents) });
+    const applied = run.validated; result = applied.result;
     reviews.push({ batchId: batch.id, pages: batch.pages.map(({ file, page }) => ({ file, page })), added: applied.added, replaced: applied.replaced, ...run.metadata });
   }
   result.warnings = [...new Set([...prepared.warnings, ...result.warnings])];
@@ -152,11 +188,13 @@ export async function matchDrawing({ file, directory, specificationJob, specific
   const reviewPath = path.join(directory, 'review-input.txt');
   await fs.writeFile(reviewPath, context + `\n<CONTRACT_DIAGNOSTIC_DATA>\n${JSON.stringify({ initialContractError, numericReviewFindings: mapSourceNames(candidateNumbers.findings, aliases) })}\n</CONTRACT_DIAGNOSTIC_DATA>\n<CANDIDATE_RESULT_DATA>\n${JSON.stringify(mapSourceNames(result, aliases))}\n</CANDIDATE_RESULT_DATA>\n`);
   onProgress('auditing', '独立重读图纸，核对漏项、图纸覆盖和规则适用理由');
-  const review = await invoke({ directory: path.join(directory, retryId ? `audit-retry-${retryId}` : 'audit'), sourcePath: reviewPath, images: prepared.images, ...auditSkill, model: MODEL_ID,
-    prompt: '任务模式：逐图独立复核。先独立重读原图，再核对候选和诊断；按已加载协议只返回有依据的改动补丁。', onProgress: message => onProgress('auditing', message) });
-  const audited = applyDrawingPatch(result, mapSourceNames(review.result, aliases, true), specification, prepared, specPrepared);
-  const guarded = applyConservativeDrawingGuards(audited.result, specification, prepared);
-  result = validateMatching(guarded.result, specification, prepared, specPrepared);
+  const review = await invokeWithContractRetry({ invoke, invocation: { directory: path.join(directory, retryId ? `audit-retry-${retryId}` : 'audit'), sourcePath: reviewPath, images: prepared.images, ...auditSkill, model: MODEL_ID,
+    prompt: '任务模式：逐图独立复核。先独立重读原图，再核对候选和诊断；按已加载协议只返回有依据的改动补丁。', onProgress: message => onProgress('auditing', message) }, validate: raw => {
+      const audited = applyDrawingPatch(result, mapSourceNames(raw, aliases, true), specification, prepared, specPrepared);
+      const guarded = applyConservativeDrawingGuards(audited.result, specification, prepared);
+      return { audited, guarded, result: validateMatching(guarded.result, specification, prepared, specPrepared) };
+    } });
+  const { audited, guarded } = review.validated; result = review.validated.result;
   const numeric = addNumericCoverageWarnings(prepared, result);
   result.warnings = [...new Set([...specification.warnings.map(w => `规范库提示：${w}`), ...prepared.warnings, ...result.warnings, ...numeric.warnings])];
   result.sourceCoverage = { ...coverage(prepared), extractionBatches: 1, reviewBatches: 1, numericReviewFindings: numeric.findings };
