@@ -13,8 +13,8 @@ import { parseContract, specificationSchema, specificationPatchSchema, verifyReq
 
 export const SPEC_SKILL = path.join(ROOT, 'skills/specification-rule-parser');
 export const DRAWING_SKILL = path.join(ROOT, 'skills/drawing-requirements-matcher');
-export const PIPELINE_VERSION = 'two-stage-v9-smaller-audit';
-export const DRAWING_PIPELINE_VERSION = 'two-stage-v12-margin-evidence';
+export const PIPELINE_VERSION = 'two-stage-v10-specific-review';
+export const DRAWING_PIPELINE_VERSION = 'two-stage-v13-specific-review';
 const json = (file, value) => fs.writeFile(file, JSON.stringify(value, null, 2));
 export const digest = value => createHash('sha256').update(value).digest('hex');
 export async function invokeWithContractRetry({ invoke = runPi, invocation, validate }) {

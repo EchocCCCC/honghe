@@ -65,12 +65,53 @@ test('sources must support their role and overridden conclusions need both docum
   const override = matchResult(); override.dispositions[0].status = 'overridden';
   assert.throws(() => validateMatching(override, specification, drawingPrepared, specPrepared), /双方证据/);
 });
-test('visual applicability evidence propagates a review flag to inherited requirements', () => {
+test('clear visual applicability evidence does not flag an inherited requirement', () => {
   const raw = matchResult(); raw.dispositions[0].evidence = [evidence('part.pdf')];
   const scanned = structuredClone(drawingPrepared); scanned.documents[0].textPages = [''];
   const result = validateMatching(raw, specification, scanned, specPrepared);
   assert.equal(result.dispositions[0].evidence[0].verification, 'visual_review');
+  assert.equal(result.requirements[0].review_required, false);
+  assert.equal(result.requirements[0].review_note, '');
+});
+
+test('clear image-only rules and combined evidence remain unflagged downstream', () => {
+  const raw = matchResult(); raw.requirements[0].origin = 'combined';
+  raw.requirements[0].sources.push(evidence('part.pdf'));
+  raw.dispositions[0].evidence = [evidence(), evidence('part.pdf')];
+  const scans = [structuredClone(specPrepared), structuredClone(drawingPrepared)];
+  for (const prepared of scans) prepared.documents[0].textPages = [''];
+  const result = validateMatching(raw, specification, scans[1], scans[0]);
+  assert.ok(result.requirements[0].sources.every(s => s.verification === 'visual_review'));
+  assert.equal(result.requirements[0].review_required, false);
+  assert.equal(result.requirements[0].review_note, '');
+});
+
+test('a missing applicability condition still propagates through clear visual evidence', () => {
+  const raw = matchResult(); raw.dispositions[0].status = 'needs_confirmation';
+  raw.dispositions[0].reason = '受检区域壁厚未提供';
+  const scans = structuredClone(specPrepared); scans.documents[0].textPages = [''];
+  const result = validateMatching(raw, specification, drawingPrepared, scans);
+  assert.equal(result.dispositions[0].evidence[0].verification, 'visual_review');
   assert.equal(result.requirements[0].review_required, true);
+  assert.match(result.requirements[0].review_note, /关联规则或适用条件尚待确认/);
+});
+
+test('unlocated applicability evidence without an image still flags linked requirements', () => {
+  const raw = matchResult(); raw.dispositions[0].evidence = [evidence('part.pdf')];
+  const absent = structuredClone(drawingPrepared); absent.documents[0].textPages = ['']; absent.documents[0].imagePages = [];
+  const result = validateMatching(raw, specification, absent, specPrepared);
+  assert.equal(result.dispositions[0].evidence[0].verification, 'unmatched_quote');
+  assert.equal(result.requirements[0].review_required, true);
+  assert.match(result.requirements[0].review_note, /关联规则或适用条件尚待确认/);
+});
+
+test('incomplete applicability-page coverage remains a concrete inherited review reason', () => {
+  const raw = matchResult(); raw.dispositions[0].evidence = [evidence('part.pdf')];
+  const incomplete = structuredClone(drawingPrepared); incomplete.documents[0].needsVisualReview = [1];
+  const result = validateMatching(raw, specification, incomplete, specPrepared);
+  assert.equal(result.requirements[0].sources[0].verification, 'text_match');
+  assert.equal(result.requirements[0].review_required, true);
+  assert.match(result.requirements[0].review_note, /关联规则或适用条件尚待确认/);
 });
 test('drawing and combined requirements need evidence from this drawing', () => {
   const raw = matchResult(); raw.requirements[0].origin = 'combined';

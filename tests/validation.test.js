@@ -26,12 +26,14 @@ test('current evidence verification rejects unknown files and out-of-range physi
   }
 });
 
-test('unmatched and visual evidence remain visibly unverified in current results', () => {
-  for (const [page, expected] of [[1, 'unmatched_quote'], [2, 'visual_review']]) {
+test('visual provenance remains visible without a blanket flag while unsupported quotes require review', () => {
+  for (const [page, expected, reviewRequired] of [[1, 'unmatched_quote', true], [2, 'visual_review', false]]) {
     const raw = item(); Object.assign(raw.sources[0], { page, quote: '原文中不存在的数值100℃' });
     const checked = verifyRequirement(raw, documents());
     assert.equal(checked.sources[0].verification, expected);
-    assert.equal(checked.review_required, true);
+    assert.equal(checked.review_required, reviewRequired);
+    if (reviewRequired) assert.match(checked.review_note, /引文未能在文字层定位且该页未提交图像/);
+    else assert.equal(checked.review_note, '');
   }
 });
 

@@ -53,9 +53,11 @@ export function verifyRequirement(item, documents) {
   const sources = verifySources(item.sources, documents);
   const notes = [];
   if (sources.some(source => documents.find(doc => doc.name === source.file)?.needsVisualReview?.includes(source.page))) notes.push('该页视觉覆盖不完整，请核对原图及局部细节。');
-  if (sources.some(s => s.verification === 'visual_review')) notes.push('图像证据待人工核对；已提交模型不等于语义正确。');
   if (sources.some(s => s.verification === 'unmatched_quote')) notes.push('引文未能在文字层定位且该页未提交图像，请核对原件。');
-  return { ...item, sources, review_required: item.review_required || notes.length > 0, review_note: appendReviewNotes(item.review_note, notes) };
+  // Visual evidence is a source type, not an unresolved reading. Keep explicit
+  // model flags; clearing historical flags requires a separate provenance-aware migration.
+  const currentNote = (item.review_note || '').split('图像证据待人工核对；已提交模型不等于语义正确。').join('').replace(/\s+/g, ' ').trim();
+  return { ...item, sources, review_required: item.review_required || notes.length > 0, review_note: appendReviewNotes(currentNote, notes) };
 }
 function appendReviewNotes(current, notes) {
   let text = current || '';
@@ -139,7 +141,11 @@ export function validateMatching(raw, specification, drawingPrepared, specPrepar
     for (const id of item.ruleIds) {
       if (!item.sources.some(s => rules.get(id).sources.some(r => s.file === r.file && s.page === r.page))) throw new Error(`要求缺少关联规则所在页的证据：${item.id}/${id}`);
     }
-    const uncertain = item.ruleIds.some(id => dispositions.get(id).status === 'needs_confirmation' || rules.get(id).review_required || dispositions.get(id).evidence.some(s => s.verification !== 'text_match'));
+    const uncertain = item.ruleIds.some(id => {
+      const disposition = dispositions.get(id);
+      return disposition.status === 'needs_confirmation' || rules.get(id).review_required || disposition.evidence.some(source =>
+        source.verification === 'unmatched_quote' || documents.find(doc => doc.name === source.file)?.needsVisualReview?.includes(source.page));
+    });
     if (uncertain) checked = { ...checked, review_required: true, review_note: appendReviewNotes(checked.review_note, ['关联规则或适用条件尚待确认。']) };
     return checked;
   });

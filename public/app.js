@@ -18,11 +18,11 @@
   const selectedDrawing = () => list(state.batch?.drawings).find(item => item.id === state.drawingId);
   const currentResult = () => selectedDrawing()?.result;
   const informationNames = { manufacturing: "直接制造约束", quality: "质量与检验", procurement: "采购与交付", context: "背景说明", unclassified: "待分类" };
-  const scopeNames = { core: "制造与检验", manufacturing: "直接制造约束", quality: "质量与检验", review: "制造与检验待确认", procurement: "采购与交付", context: "背景说明", unclassified: "待分类", all: "全部记录" };
+  const scopeNames = { core: "制造与检验", manufacturing: "直接制造约束", quality: "质量与检验", review: "制造与检验待复核", procurement: "采购与交付", context: "背景说明", unclassified: "待分类", all: "全部记录" };
   const informationType = item => Object.hasOwn(informationNames, item?.informationType) ? item.informationType : "unclassified";
   const core = item => ["manufacturing", "quality", "unclassified"].includes(informationType(item));
   const classificationPending = item => Boolean(item.classificationPending || item.classification?.pending || informationType(item) === "unclassified");
-  const needsReview = item => Boolean(item.review_required || classificationPending(item) || str(item.review_note).trim());
+  const needsReview = item => Boolean(item.review_required || classificationPending(item));
   function informationSummary(items) {
     const counts = { total: items.length, manufacturing: 0, quality: 0, procurement: 0, context: 0, unclassified: 0 };
     items.forEach(item => counts[informationType(item)]++);
