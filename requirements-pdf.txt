@@ -1,1 +1,2 @@
 -r skills/specification-rule-parser/scripts/requirements.txt
+-r skills/drawing-requirements-matcher/scripts/requirements.txt

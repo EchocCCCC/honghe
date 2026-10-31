@@ -27,6 +27,48 @@ async function fixture(t) {
 }
 const validate = raw => applyRulePatch(specification, raw, batch, documents);
 
+for (const keepEarlierRepair of [true, false]) {
+  test(`an audit retry ${keepEarlierRepair ? 'retains' : 'cannot omit'} earlier model repairs when correcting the last source-page diagnostic`, async t => {
+    const invocation = await fixture(t);
+    const firstRule = { ...structuredClone(rule), usage: 'inspection' };
+    const secondRule = { ...structuredClone(rule), id: 'R002', usage: 'inspection', sources: [{ ...source(), page: 2 }] };
+    const spec = { ...specification, scopePolicy: 'drawing-plus-inspection-v1', rules: [firstRule, secondRule] };
+    const specPrepared = { documents: [{ ...documents[0], pages: 2, textPages: ['不得补焊', '不得补焊'] }] };
+    const drawingPrepared = { documents: [documents[1]] };
+    const drawing = { partNumber: 'P', name: 'part', airtightness: 'unspecified', dimensionState: 'unspecified', facts: [], uncertainties: [] };
+    const candidate = { drawing, summary: '', requirements: [
+      { ...structuredClone(requirement), id: 'REQ001', processCategory: '检验', conflict: null, origin: 'specification', ruleIds: ['R001'] },
+      { ...structuredClone(requirement), id: 'REQ002', processCategory: '检验', conflict: null, origin: 'specification', ruleIds: ['R002'] },
+    ], dispositions: [
+      { ruleId: 'R001', status: 'applicable', reason: '适用', evidence: source() },
+      { ruleId: 'R002', status: 'applicable', reason: '适用', evidence: { ...source(), page: 2 } },
+    ], warnings: [] };
+    const initialPatch = { drawing, summary: '', replacements: [], additions: [], removals: [], warnings: [],
+      dispositionReplacements: candidate.dispositions.map(d => ({ ...d, evidence: [structuredClone(d.evidence)] })),
+    };
+    const corrected = { ...structuredClone(initialPatch), replacements: [{ ...candidate.requirements[1], sources: [{ ...source(), page: 2 }] }],
+      dispositionReplacements: keepEarlierRepair ? structuredClone(initialPatch.dispositionReplacements) : [],
+    };
+    const originals = structuredClone({ candidate, initialPatch, corrected });
+    const calls = [];
+    const promise = invokeWithContractRetry({ invocation,
+      validate: raw => applyDrawingPatch(candidate, raw, spec, drawingPrepared, specPrepared),
+      invoke: async options => { calls.push(options); return { result: calls.length === 1 ? initialPatch : corrected, metadata: { call: calls.length } }; },
+    });
+    if (keepEarlierRepair) {
+      const accepted = await promise;
+      assert.equal(accepted.validated.result.dispositions.every(d => Array.isArray(d.evidence)), true);
+      assert.equal(accepted.validated.result.requirements[1].sources[0].page, 2);
+    } else await assert.rejects(promise, /dispositions\.0\.evidence/);
+    assert.equal(calls.length, 2);
+    const failure = JSON.parse(await fs.readFile(path.join(invocation.directory, 'contract-failure.json'), 'utf8'));
+    assert.match(failure.diagnostic, /REQ002\/R002/);
+    assert.match(calls[1].prompt, /上次失败补丁没有被应用/);
+    assert.match(calls[1].prompt, /重新包含上次补丁中所有仍正确且必须执行/);
+    assert.deepEqual({ candidate, initialPatch, corrected }, originals);
+  });
+}
+
 test('a valid candidate is used without another call or failure artifacts', async t => {
   const invocation = await fixture(t); let calls = 0;
   const run = { result: patch(), metadata: { call: 1 } };
@@ -54,6 +96,8 @@ test('only the model repairs the invalid enum using the same source, images, Ski
   assert.ok(input.startsWith(await fs.readFile(invocation.sourcePath, 'utf8')));
   assert.ok(input.includes(JSON.stringify(original))); assert.match(input, /additions\.0\.informationType/);
   assert.ok(retry.prompt.startsWith(invocation.prompt)); assert.match(retry.prompt, /不得.*改写数值/);
+  assert.match(retry.prompt, /上次失败补丁没有被应用/);
+  assert.match(retry.prompt, /相对于原始候选返回完整纠正补丁/);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(invocation.directory, 'model-result.json'), 'utf8')), original);
   assert.equal(accepted.validated.result.rules[1].informationType, 'quality');
   assert.equal(accepted.metadata.contractRetry.originalMetadata.call, 1);

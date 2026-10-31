@@ -39,10 +39,23 @@ test('drawing discovery deduplicates the same PDF within its stage and preserves
   const input = [older, newer, phase, legacy, foreign], before = structuredClone(input);
   const f = fixture('spec', () => {}), rows = f.rows(input, 'spec');
   assert.equal(rows.length, 5);
-  assert.equal(rows.find(row => row.sourceSha256 === 'same' && row.stage === 'all').id, 'a');
+  assert.equal(rows.find(row => row.sourceSha256 === 'same' && row.stage === 'all').id, 'retry');
   assert.equal(rows.find(row => row.stage === 'sample').id, 'c');
-  assert.equal(rows.some(row => row.id === 'foreign' || row.id === 'retry'), false);
+  assert.equal(rows.some(row => row.id === 'foreign' || row.id === 'a'), false);
   assert.deepEqual(input, before);
+});
+
+test('new unfinished or failed attempts remain visible instead of silently selecting an older successful result', async () => {
+  for (const status of ['reading', 'matching', 'auditing', 'failed']) {
+    const old = batch('old-batch', 'spec', [drawing('old', { sourceSha256: 'same' })]);
+    const latest = batch('latest-batch', 'spec', [drawing('latest', { sourceSha256: 'same', status, hasResult: false })], { createdAt: '2026-10-29T10:00:00.000Z', status: status === 'failed' ? 'failed' : 'running' });
+    const f = fixture('spec', url => url.includes('?') ? { batches: [old, latest] } : full(latest));
+    await f.refresh('spec', { open: true });
+    const rows = f.rows(f.state.savedBatches, 'spec');
+    assert.equal(rows.length, 1); assert.equal(rows[0].status, status); assert.equal(rows[0].hasResult, false);
+    assert.equal(f.state.batchId, latest.id); assert.equal(f.state.drawingId, 'latest');
+    assert.equal(f.calls.at(-1).url, '/api/drawing-batches/latest-batch');
+  }
 });
 
 test('selecting a specification discovers its saved results with GETs and replaces a mismatched old batch', async () => {

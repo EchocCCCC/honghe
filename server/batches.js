@@ -2,6 +2,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 export const pageKey = (file, page) => JSON.stringify([file, page]);
+// Verification is derived by the backend, not a source field the model may
+// return. Remove it only while serializing source records for model input.
+export function modelInputJson(value) {
+  return JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) &&
+    Object.hasOwn(item, 'file') && Object.hasOwn(item, 'page') && Object.hasOwn(item, 'quote')
+    ? Object.fromEntries(Object.entries(item).filter(([key]) => key !== 'verification')) : item);
+}
 const normalize = value => String(value ?? '').normalize('NFKC').replace(/\s/g, '');
 // Only exact technical equivalence is deduplicated. Different scopes, states,
 // values, units or evidence must remain separate even with identical prose.
@@ -42,6 +49,6 @@ export async function writeBatchSource(directory, prepared, batch, extraData) {
   const sourcePath = path.join(directory, 'batch-source.txt');
   const original = await fs.readFile(prepared.sourcePath, 'utf8');
   await fs.writeFile(sourcePath, `本批负责的物理页：${JSON.stringify(targets)}\n\n${original}\n` +
-    (extraData ? '\n<COMPLETE_EXTRACTION_RESULT_DATA>\n' + JSON.stringify(extraData) + '\n</COMPLETE_EXTRACTION_RESULT_DATA>\n' : ''));
+    (extraData ? '\n<COMPLETE_EXTRACTION_RESULT_DATA>\n' + modelInputJson(extraData) + '\n</COMPLETE_EXTRACTION_RESULT_DATA>\n' : ''));
   return sourcePath;
 }

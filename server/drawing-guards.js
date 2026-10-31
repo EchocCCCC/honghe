@@ -1,3 +1,5 @@
+import { usesDrawingScope, inheritableRules } from './information-types.js';
+
 // Short source IDs are an exact transport mapping, never fuzzy filename repair.
 export function sourceAliases(specPrepared, drawingPrepared) {
   return [...specPrepared.documents.map((d, i) => ({ id: `S${i + 1}`, file: d.name, pages: d.pages, role: 'specification' })),
@@ -20,14 +22,34 @@ export function aliasSourceText(text, aliases) {
   return text;
 }
 
+function conditionalInspection(result, specification, active, note, label) {
+  const rules = new Map(specification.rules.map(rule => [rule.id, rule]));
+  const changes = [];
+  const requirements = result.requirements.map(item => {
+    if (!item.ruleIds.some(id => active.has(id))) return item;
+    changes.push({ candidateId: item.id, ruleIds: item.ruleIds.filter(id => active.has(id)), reason: note });
+    // Keep the model's selected material/region and its evidence. Replacing an
+    // item with an entire specification table would reintroduce other grades,
+    // comparison-only manufacturing clauses, or erase drawing-specific values.
+    return { ...item, requirement: item.requirement.startsWith(`条件要求（${label}）：`) ? item.requirement : `条件要求（${label}）：${item.requirement}`,
+      scope: item.scope.includes(note) ? item.scope : `${item.scope}；${note}`, review_required: true,
+      review_note: item.review_note.includes(note) ? item.review_note : [item.review_note, note].filter(Boolean).join(' ') };
+  });
+  const dispositions = result.dispositions.map(d => active.has(d.ruleId) ? { ...d, status: 'needs_confirmation', reason: note, evidence: structuredClone(rules.get(d.ruleId).sources) } : d);
+  return { result: { ...result, requirements, dispositions,
+    drawing: { ...result.drawing, uncertainties: [...new Set([...result.drawing.uncertainties, note])] },
+    warnings: [...new Set([...result.warnings, note])] }, changes };
+}
+
 // This release has no operator-confirmed regional wall-thickness input. Keep
 // NDT thickness bands conditional; overall/step/groove dimensions cannot confirm them.
 export function guardRegionalWallThickness(result, specification) {
   const rules = new Map(specification.rules.map(r => [r.id, r]));
-  const guarded = new Set(specification.rules.filter(r => r.informationType !== 'context' && /内部质量/.test(r.category) && /壁厚/.test([r.requirement, r.scope, ...r.conditions, ...r.parameters.map(p => p.name)].join(' '))).map(r => r.id));
-  const active = new Set(result.dispositions.filter(d => guarded.has(d.ruleId) && d.status !== 'not_applicable').map(d => d.ruleId));
+  const guarded = new Set(inheritableRules(specification).filter(r => /内部质量/.test(r.category) && /壁厚/.test([r.requirement, r.scope, ...r.conditions, ...r.parameters.map(p => p.name)].join(' '))).map(r => r.id));
+  const active = new Set(result.dispositions.filter(d => guarded.has(d.ruleId) && d.status !== 'not_applicable' && (!usesDrawingScope(specification) || d.status !== 'overridden')).map(d => d.ruleId));
   if (!active.size) return { result, changes: [] };
   const note = '受检区域的局部壁厚未经人工确认，内部质量分档待确认；总高、台阶高、槽尺寸等不自动作为局部壁厚。';
+  if (usesDrawingScope(specification)) return conditionalInspection(result, specification, active, note, '局部壁厚分档未确认');
   const changes = [], requirements = [], seen = new Set(result.requirements.map(r => r.id));
   for (const item of result.requirements) {
     if (!item.ruleIds.some(id => active.has(id))) { requirements.push(item); continue; }
@@ -56,13 +78,14 @@ const leakagePressure = /(?:(?:气密(?:性)?(?:试验|检验)|泄漏(?:试验|�
 export function guardPressurePurpose(result, specification, drawingPrepared) {
   const drawingFiles = new Set(drawingPrepared.documents.map(d => d.name));
   const rules = new Map(specification.rules.map(r => [r.id, r]));
-  const pressureRules = new Set(specification.rules.filter(r => r.informationType !== 'context' && /气密|沉水|泄漏/.test(r.requirement) && /压力|MPa|kPa|bar/.test(r.requirement + JSON.stringify(r.parameters))).map(r => r.id));
+  const pressureRules = new Set(inheritableRules(specification).filter(r => /气密|沉水|泄漏/.test(r.requirement) && /压力|MPa|kPa|bar/.test(r.requirement + JSON.stringify(r.parameters))).map(r => r.id));
   const sources = [...result.requirements.flatMap(r => r.sources), ...result.drawing.facts.flatMap(f => f.sources)].filter(s => drawingFiles.has(s.file));
   const drawingText = [...drawingPrepared.documents.flatMap(d => d.textPages || []), ...sources.map(s => s.quote)].join('\n');
   if (!proofPressure.test(drawingText) || leakagePressure.test(drawingText)) return { result, changes: [] };
-  const active = new Set(result.dispositions.filter(d => pressureRules.has(d.ruleId) && d.status !== 'not_applicable').map(d => d.ruleId));
+  const active = new Set(result.dispositions.filter(d => pressureRules.has(d.ruleId) && d.status !== 'not_applicable' && (!usesDrawingScope(specification) || d.status !== 'overridden')).map(d => d.ruleId));
   if (!active.size) return { result, changes: [] };
   const note = '图纸耐压/爆破/水压与气密泄漏检验压力用途不同，未见明确气密试验压力依据；不得将其相互替代。须确认试验用途、压力、方法与时间及规范默认条款的适用关系。';
+  if (usesDrawingScope(specification)) return conditionalInspection(result, specification, active, note, '试验用途与适用关系未确认');
   const changes = [], requirements = [], seen = new Set(result.requirements.map(r => r.id));
   for (const item of result.requirements) {
     if (!item.ruleIds.some(id => active.has(id))) { requirements.push(item); continue; }
@@ -83,13 +106,13 @@ export function guardPressurePurpose(result, specification, drawingPrepared) {
     summary: `${result.drawing.name || '当前零件'}依据选定规范分析。${note}；逐项要求中的规范压力保留原适用条件。`, warnings: [...new Set([...result.warnings, note])] }, changes };
 }
 
-function standardTokens(text) {
+export function standardTokens(text) {
   return [...String(text).matchAll(/\b(?:EN|ISO|GB(?:\/T)?)\s*\d{3,6}(?:\s*[-－]\s*\d+)?/gi)].map(m => m[0].toUpperCase().replace(/\s/g, '').replaceAll('－', '-'));
 }
 // Absence of an exact source token causes a pending label, never a guessed code.
 export function guardDrawingStandardClaims(result, drawingPrepared) {
   const files = new Set(drawingPrepared.documents.map(d => d.name));
-  const text = [...drawingPrepared.documents.flatMap(d => d.textPages || []), ...result.drawing.facts.flatMap(f => f.sources.filter(s => files.has(s.file)).map(s => s.quote))].join('\n');
+  const text = [...drawingPrepared.documents.flatMap(d => d.textPages || []), ...result.drawing.facts.flatMap(f => f.sources.filter(s => files.has(s.file)).map(s => s.quote)), ...result.requirements.flatMap(item => item.sources.filter(s => files.has(s.file)).map(s => s.quote))].join('\n');
   const supported = new Set(standardTokens(text));
   const unsupported = value => standardTokens(value).some(token => !supported.has(token));
   const changes = [], note = '部分图面标准号未在独立文字层或事实引文中逐字定位，仅保留候选；须核对原图字形与编号差异，不自动改为常用标准号。';
@@ -111,10 +134,11 @@ export function guardDrawingStandardClaims(result, drawingPrepared) {
 // Finished local geometry is not a confirmed raw-stock nominal section size.
 export function guardMaterialSectionDimensions(result, specification) {
   const rules = new Map(specification.rules.map(r => [r.id, r]));
-  const dimensional = new Set(specification.rules.filter(r => r.informationType !== 'context' && /力学性能/.test(r.category) && /厚度|壁厚|直径/.test([r.requirement, r.scope, ...r.conditions, ...r.parameters.map(p => p.name)].join(' '))).map(r => r.id));
-  const active = new Set(result.dispositions.filter(d => dimensional.has(d.ruleId) && d.status !== 'not_applicable').map(d => d.ruleId));
+  const dimensional = new Set(inheritableRules(specification).filter(r => /力学性能/.test(r.category) && /厚度|壁厚|直径/.test([r.requirement, r.scope, ...r.conditions, ...r.parameters.map(p => p.name)].join(' '))).map(r => r.id));
+  const active = new Set(result.dispositions.filter(d => dimensional.has(d.ruleId) && d.status !== 'not_applicable' && (!usesDrawingScope(specification) || d.status !== 'overridden')).map(d => d.ruleId));
   if (!active.size) return { result, changes: [] };
   const note = '原材料公称厚度/直径及材料形态未由人工确认；成品局部厚度、沉孔深度、台阶或其他加工尺寸不能作为原材料尺寸选力学性能档。保留规范候选分档条件待确认。';
+  if (usesDrawingScope(specification)) return conditionalInspection(result, specification, active, note, '原材料尺寸分档未确认');
   const changes = [], requirements = [], seen = new Set(result.requirements.map(r => r.id));
   for (const item of result.requirements) {
     if (!item.ruleIds.some(id => active.has(id))) {

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import express from 'express';
 import { validateMatching, ruleSchema, applyDrawingPatch } from '../server/two-stage-schema.js';
-import { mergeRules, applyRulePatch, ruleKey, matchDrawing } from '../server/two-stage-pipeline.js';
+import { mergeRules, applyRulePatch, ruleKey, matchDrawing, digest } from '../server/two-stage-pipeline.js';
 import { loadSkillBundle, compileSkill } from '../server/skills.js';
 import { DRAWING_SKILL } from '../server/two-stage-pipeline.js';
 import { createTwoStageRouter, WorkQueue } from '../server/two-stage-routes.js';
@@ -229,34 +229,129 @@ test('unlocated drawing standard codes remain candidates and are never fuzzily c
   assert.equal(guarded.result.drawing.references[0].includes('12346'), false);
 });
 
-test('planned audit may repair a complete JSON candidate, but invalid audit output is never published', async () => {
+test('drawing reading, image-free norm delta and original audit remain isolated and audited errors are retried once', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'honghe-two-stage-'));
   try {
-    const specText = path.join(root, 'spec.txt'), drawingText = path.join(root, 'drawing.txt');
-    await fs.writeFile(specText, 'test requirement'); await fs.writeFile(drawingText, 'test requirement');
+    const specText = path.join(root, 'spec.txt'), drawingText = path.join(root, 'drawing.txt'), ocrText = path.join(root, 'ocr-candidates.txt');
+    await fs.writeFile(specText, 'spec-only-marker test requirement'); await fs.writeFile(drawingText, 'drawing-only-marker finished thickness 15');
+    await fs.writeFile(ocrText, 'ocr-only-candidate-marker: uncertain symbols');
     await fs.writeFile(path.join(root, 'prepared.json'), JSON.stringify({ ...specPrepared, sourcePath: specText }));
-    const prepared = { ...drawingPrepared, sourcePath: drawingText, images: [], warnings: [], pages: [{ file: 'part.pdf', page: 1, imagePaths: [], landscape: false, text: 'test requirement' }] };
-    const job = { id: 'spec', result: specification, fingerprint: { sourceSha256: 'source' } };
-    const invalid = matchResult(); invalid.requirements[0].origin = 'combined';
-    let calls = 0;
+    const prepared = { ...drawingPrepared, sourcePath: drawingText, ocrTextPath: ocrText, images: [], warnings: [], pages: [{ file: 'part.pdf', page: 1, imagePaths: [], landscape: false, text: 'test requirement' }] };
+    const currentResult = () => { const value = matchResult(); value.requirements[0].processCategory = '检验'; value.requirements[0].conflict = null; return value; };
+    const currentRead = () => ({ ...matchResult(), requirements: [{ ...base('DRAW-001', 'part.pdf'), processCategory: '机加', category: '成品厚度', requirement: '15 mm',
+      origin: 'drawing', ruleIds: [], conflict: null }], dispositions: [] });
+    const currentDelta = () => ({ additions: currentResult().requirements, bindings: [], dispositions: currentResult().dispositions, warnings: [] });
+    const currentPatch = () => ({ ...auditPatch(), replacements: [] });
+    const currentSpecification = { ...specification, scopePolicy: 'drawing-plus-inspection-v1', rules: specification.rules.map(rule => ({ ...rule, usage: 'inspection' })), warnings: ['historical-warning-marker'], run: { history: 'historical-run-marker' } };
+    const job = { id: 'spec', result: currentSpecification, fingerprint: { sourceSha256: 'source' } };
+    const invalid = currentResult(); invalid.requirements[0].origin = 'combined';
+    let calls = 0, audits = 0;
     const successDir = path.join(root, 'repaired');
-    const result = await matchDrawing({ file: { name: 'part.pdf' }, directory: successDir, specificationJob: job, specificationDirectory: root, prepare: async () => structuredClone(prepared),
-      invoke: async () => ({ result: ++calls === 1 ? structuredClone(invalid) : auditPatch(), metadata: { model: 'deepseek-flash' } }) });
-    assert.equal(calls, 2); assert.match(result.run.initialContractError, /本零件证据/);
+    const result = await matchDrawing({ file: { name: 'part.pdf' }, directory: successDir, specificationJob: job, specificationDirectory: root,
+      prepare: async (_files, _directory, options) => { assert.deepEqual(options, { detailMode: true, ocr: true }); return structuredClone(prepared); },
+      invoke: async options => {
+        const input = await fs.readFile(options.sourcePath, 'utf8');
+        assert.doesNotMatch(input, /historical-warning-marker|historical-run-marker/);
+        calls++;
+        if (options.skillProvenance.mode === 'read') {
+          assert.match(input, /drawing-only-marker/); assert.doesNotMatch(input, /spec-only-marker|SELECTED_SPECIFICATION_RULE_PACKAGE|"S1"/);
+          assert.match(input, /<OCR_CANDIDATE_DATA>\nocr-only-candidate-marker/);
+          return { result: currentRead(), metadata: { model: 'deepseek-flash' } };
+        }
+        if (options.skillProvenance.mode === 'match') {
+          assert.deepEqual(options.images, []);
+          assert.doesNotMatch(input, /drawing-only-marker|spec-only-marker|15 mm|ocr-only-candidate-marker|OCR_CANDIDATE_DATA/);
+          assert.match(input, /DRAWING_MATCHING_CONDITIONS_DATA|"unknown"/);
+          return { result: currentDelta(), metadata: { model: 'deepseek-flash' } };
+        }
+        assert.match(input, /drawing-only-marker/); assert.match(input, /spec-only-marker/);
+        assert.match(input, /<OCR_CANDIDATE_DATA>\nocr-only-candidate-marker/);
+        return { result: ++audits === 1 ? { ...currentPatch(), replacements: invalid.requirements } : currentPatch(), metadata: { model: 'deepseek-flash' } };
+      } });
+    assert.equal(calls, 4); assert.equal(audits, 2);
+    assert.equal(result.run.reading.model, 'deepseek-flash'); assert.equal(result.run.matching.contractRetry, undefined);
+    assert.equal(result.review.metadata.contractRetry.retryCount, 1);
+    assert.equal(result.requirements.find(row => row.id === 'DRAW-001').requirement, '15 mm');
+    assert.equal(await fs.readFile(drawingText, 'utf8'), 'drawing-only-marker finished thickness 15', 'OCR must never replace the original PDF text');
     assert.equal(JSON.parse(await fs.readFile(path.join(successDir, 'result.json'), 'utf8')).ruleCoverage.decided, 1);
     const failedDir = path.join(root, 'rejected');
-    let badCalls = 0; const badPatch = auditPatch(); badPatch.replacements = invalid.requirements;
-    await assert.rejects(matchDrawing({ file: { name: 'part.pdf' }, directory: failedDir, specificationJob: job, specificationDirectory: root, prepare: async () => structuredClone(prepared), invoke: async () => ({ result: ++badCalls === 1 ? structuredClone(invalid) : badPatch, metadata: {} }) }), /本零件证据/);
+    let badCalls = 0; const badPatch = currentPatch(); badPatch.replacements = invalid.requirements;
+    await assert.rejects(matchDrawing({ file: { name: 'part.pdf' }, directory: failedDir, specificationJob: job, specificationDirectory: root, prepare: async () => structuredClone(prepared),
+      invoke: async options => { badCalls++; return { result: options.skillProvenance.mode === 'read' ? currentRead() : options.skillProvenance.mode === 'match' ? currentDelta() : badPatch, metadata: {} }; } }), /本零件证据/);
+    assert.equal(badCalls, 4);
     await assert.rejects(fs.access(path.join(failedDir, 'result.json')));
     const matchingSkill = compileSkill(await loadSkillBundle(DRAWING_SKILL), 'match');
     let retries = 0;
-    const retry = await matchDrawing({ file: { name: 'part.pdf' }, directory: path.join(root, 'retry'), specificationJob: job, specificationDirectory: root, prepare: async () => structuredClone(prepared), initialRun: { result: invalid, metadata: { model: 'deepseek-flash', stopReason: 'stop', skillBundleSha256: matchingSkill.bundleSha256, skillSha256: matchingSkill.sha256 } }, retryId: 'test', invoke: async () => { retries++; return { result: auditPatch(), metadata: {} }; } });
-    assert.equal(retries, 1); assert.equal(retry.run.reusedMatching, true);
+    const retry = await matchDrawing({ file: { name: 'part.pdf' }, directory: path.join(root, 'retry'), specificationJob: job, specificationDirectory: root, prepare: async () => structuredClone(prepared),
+      initialRun: { result: currentDelta(), metadata: { model: 'deepseek-flash', stopReason: 'stop', skillBundleSha256: matchingSkill.bundleSha256, skillSha256: matchingSkill.sha256, conditionsFingerprint: result.run.matching.conditionsFingerprint } }, retryId: 'test',
+      invoke: async options => { retries++; return { result: options.skillProvenance.mode === 'read' ? currentRead() : currentPatch(), metadata: {} }; } });
+    assert.equal(retries, 2); assert.equal(retry.run.reusedMatching, true);
     let reruns = 0;
     const stale = await matchDrawing({ file: { name: 'part.pdf' }, directory: path.join(root, 'stale-retry'), specificationJob: job, specificationDirectory: root,
       prepare: async () => structuredClone(prepared), initialRun: { result: invalid, metadata: { model: 'deepseek-flash', stopReason: 'stop' } },
-      invoke: async () => ({ result: ++reruns === 1 ? matchResult() : auditPatch(), metadata: {} }) });
-    assert.equal(reruns, 2); assert.equal(stale.run.reusedMatching, false);
+      invoke: async options => { reruns++; return { result: options.skillProvenance.mode === 'read' ? currentRead() : options.skillProvenance.mode === 'match' ? currentDelta() : currentPatch(), metadata: {} }; } });
+    assert.equal(reruns, 3); assert.equal(stale.run.reusedMatching, false);
+    const correctedDir = path.join(root, 'corrected-conditions');
+    const guessedRead = currentRead();
+    guessedRead.drawing.materialForm = '板材';
+    guessedRead.drawing.facts = [
+      { name: '原材料形态', value: '板材', sources: [evidence('part.pdf')] },
+      { name: '原材料公称厚度', value: '15', sources: [evidence('part.pdf')] },
+    ];
+    const correctedPatch = currentPatch();
+    correctedPatch.replacements = [{ ...guessedRead.requirements[0], requirement: '16 mm' }];
+    const correctedCalls = [];
+    const corrected = await matchDrawing({ file: { name: 'part.pdf' }, directory: correctedDir, specificationJob: job, specificationDirectory: root, prepare: async () => structuredClone(prepared),
+      invoke: async options => {
+        const mode = options.skillProvenance.mode;
+        const round = options.directory.includes(path.sep + 'rematch-1' + path.sep) ? 1 : 0;
+        correctedCalls.push({ mode, round, directory: options.directory });
+        if (mode === 'match') {
+          assert.deepEqual(options.images, []);
+          const input = await fs.readFile(options.sourcePath, 'utf8');
+          const conditions = JSON.parse(input.split('<DRAWING_MATCHING_CONDITIONS_DATA>')[1].split('</DRAWING_MATCHING_CONDITIONS_DATA>')[0]);
+          if (round) {
+            assert.equal(conditions.materialForm, 'unknown');
+            assert.equal(conditions.rawMaterial.nominalThickness, 'unknown');
+            assert.doesNotMatch(input, /16 mm|ocr-only-candidate-marker/);
+          } else assert.equal(conditions.rawMaterial.nominalThickness.value, '15');
+        }
+        const output = mode === 'read' ? guessedRead : mode === 'match' ? currentDelta() : correctedPatch;
+        const metadata = { model: 'deepseek-flash', mode, testCall: correctedCalls.length };
+        await fs.mkdir(options.directory, { recursive: true });
+        await fs.writeFile(path.join(options.directory, 'model-result.json'), JSON.stringify(output), { flag: 'wx' });
+        await fs.writeFile(path.join(options.directory, 'run-metadata.json'), JSON.stringify(metadata), { flag: 'wx' });
+        return { result: output, metadata };
+      } });
+    assert.deepEqual(correctedCalls.map(call => call.mode), ['read', 'match', 'audit', 'match', 'audit']);
+    assert.deepEqual(correctedCalls.map(call => call.round), [0, 0, 0, 1, 1]);
+    assert.equal(new Set(correctedCalls.map(call => call.directory)).size, 5);
+    assert.equal(corrected.drawing.materialForm, '');
+    assert.equal(corrected.requirements.find(row => row.id === 'DRAW-001').requirement, '16 mm');
+    assert.equal(corrected.run.rematch.count, 1);
+    assert.equal(corrected.sourceCoverage.reviewBatches, 2);
+    assert.equal(JSON.parse(await fs.readFile(path.join(correctedDir, 'drawing-read.json'), 'utf8')).drawing.materialForm, '板材');
+    assert.equal(JSON.parse(await fs.readFile(path.join(correctedDir, 'audited-result.json'), 'utf8')).drawing.materialForm, '');
+    assert.equal(JSON.parse(await fs.readFile(path.join(correctedDir, 'rematch-1/drawing-read.json'), 'utf8')).drawing.materialForm, '');
+    for (const [key, value] of Object.entries(corrected.run.rematch)) {
+      if (key === 'count') continue;
+      assert.equal(path.isAbsolute(value.artifact), false);
+      assert.deepEqual(Object.keys(value).sort(), ['artifact', 'sha256']);
+      assert.equal(value.sha256, digest(await fs.readFile(path.join(correctedDir, value.artifact))));
+    }
+    assert.equal(JSON.stringify(corrected).includes(root), false);
+    assert.match(JSON.parse(await fs.readFile(path.join(correctedDir, 'rematch-required.json'), 'utf8')).reason, /重新匹配/);
+    await assert.rejects(fs.access(path.join(correctedDir, 'audit/contract-failure.json')));
+    await assert.rejects(fs.access(path.join(correctedDir, 'rematch-1/audit/contract-failure.json')));
+    const geometryDir = path.join(root, 'ordinary-geometry-correction');
+    const geometryModes = [];
+    const geometryOnly = await matchDrawing({ file: { name: 'part.pdf' }, directory: geometryDir, specificationJob: job, specificationDirectory: root, prepare: async () => structuredClone(prepared),
+      invoke: async options => { const mode = options.skillProvenance.mode; geometryModes.push(mode);
+        return { result: mode === 'read' ? currentRead() : mode === 'match' ? currentDelta() : correctedPatch, metadata: {} }; } });
+    assert.deepEqual(geometryModes, ['read', 'match', 'audit']);
+    assert.equal(geometryOnly.requirements.find(row => row.id === 'DRAW-001').requirement, '16 mm');
+    assert.equal(geometryOnly.run.rematch, undefined);
+
   } finally {
     assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir())); assert.match(path.basename(root), /^honghe-two-stage-/);
     await fs.rm(root, { recursive: true, force: true });

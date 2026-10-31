@@ -3,7 +3,7 @@
 (() => {
   const $ = id => document.getElementById(id);
   const state = { configured: false, specifications: [], specId: null, specJob: null, specSubmitting: false, drawingSubmitting: false, files: [], batchId: null, batch: null, drawingId: null, resultKey: "", filter: "core", search: "", pollTimer: null, pollRunning: false, pollErrors: 0, specListRequest: null, specRequests: new Map(), specListKey: "", retryingDrawings: new Set(), savedBatches: [], savedSpecId: null, savedLoading: false, savedError: "", savedRequest: 0 };
-  const statusNames = { queued: "等待处理", preparing: "读取页面", extracting: "解析规则", matching: "匹配要求", auditing: "核对原文", running: "正在处理", completed: "已完成", partial: "部分完成", failed: "未完成" };
+  const statusNames = { queued: "等待处理", preparing: "读取页面", extracting: "解析规则", reading: "识读图纸", matching: "匹配要求", auditing: "核对原文", running: "正在处理", completed: "已完成", partial: "部分完成", failed: "未完成" };
   const strengthNames = { required: "必须", prohibited: "禁止", recommended: "推荐", permitted: "允许", reference: "参考", conditional: "条件适用" };
   const dispositionNames = { applicable: "适用", not_applicable: "不适用", overridden: "图纸覆盖", needs_confirmation: "待确认" };
   const originNames = { drawing: "图纸要求", specification: "规范要求", combined: "规范＋图纸" };
@@ -18,10 +18,16 @@
   const selectedDrawing = () => list(state.batch?.drawings).find(item => item.id === state.drawingId);
   const currentResult = () => selectedDrawing()?.result;
   const informationNames = { manufacturing: "直接制造约束", quality: "质量与检验", procurement: "采购与交付", context: "背景说明", unclassified: "待分类" };
+  const processNames = ["铸造", "机加", "热处理", "表面处理", "刻字", "检验", "焊接", "其他"];
+  const processCategory = item => processNames.includes(item?.processCategory) ? item.processCategory : "待分类";
+  const drawingScope = result => result?.scopePolicy === "drawing-plus-inspection-v1" || list(result?.requirements || result?.rules).some(item => processNames.includes(item.processCategory));
+  const conflictKind = item => ["conflict", "drawing_override"].includes(item?.conflict?.kind) ? item.conflict.kind : "";
+  const processScope = (item, scope) => ["core", "all"].includes(scope) || scope === "review" && needsReview(item) || scope === "conflict" && conflictKind(item) === "conflict" || scope === "override" && conflictKind(item) === "drawing_override" || scope === `process:${processCategory(item)}`;
+  const processLabel = scope => ({ core: "全部工艺", all: "全部工艺", review: "待复核", conflict: "要求冲突", override: "图纸覆盖" })[scope] || (scope.startsWith("process:") ? scope.slice(8) : "全部工艺");
   const scopeNames = { core: "制造与检验", manufacturing: "直接制造约束", quality: "质量与检验", review: "制造与检验待复核", procurement: "采购与交付", context: "背景说明", unclassified: "待分类", all: "全部记录" };
   const informationType = item => Object.hasOwn(informationNames, item?.informationType) ? item.informationType : "unclassified";
   const core = item => ["manufacturing", "quality", "unclassified"].includes(informationType(item));
-  const classificationPending = item => Boolean(item.classificationPending || item.classification?.pending || informationType(item) === "unclassified");
+  const classificationPending = item => Boolean(item.processCategory ? processCategory(item) === "待分类" : item.classificationPending || item.classification?.pending || informationType(item) === "unclassified");
   const needsReview = item => Boolean(item.review_required || classificationPending(item));
   function informationSummary(items) {
     const counts = { total: items.length, manufacturing: 0, quality: 0, procurement: 0, context: 0, unclassified: 0 };
@@ -41,6 +47,7 @@
     return tag;
   }
   function classificationExplanation(item) {
+    if (processNames.includes(item.processCategory)) return null;
     if (!item.classification?.reason && !classificationPending(item)) return null;
     const panel = details(classificationPending(item) ? "分类依据 · 待确认" : "分类依据"); panel.node.classList.add("classification-details");
     if (item.classification?.reason) panel.body.append(el("p", "", item.classification.reason));
@@ -49,7 +56,16 @@
   }
   function filteredRequirements(result, scope = state.filter, keyword = state.search) {
     const query = str(keyword).trim().toLocaleLowerCase();
-    return list(result.requirements).filter(item => inScope(item, scope) && (!query || JSON.stringify(item).toLocaleLowerCase().includes(query)));
+    return list(result.requirements).filter(item => (drawingScope(result) ? processScope(item, scope) : inScope(item, scope)) && (!query || JSON.stringify(item).toLocaleLowerCase().includes(query)));
+  }
+  function processTag(item) { return el("span", "process-tag", processCategory(item)); }
+  function conflictPanel(item) {
+    const kind = conflictKind(item); if (!kind) return null;
+    const panel = el("div", `requirement-conflict ${kind}`);
+    panel.append(el("strong", "", kind === "conflict" ? "要求冲突 · 以图纸为准，需核对" : "图纸覆盖通用要求"));
+    const fields = el("dl", "conflict-values");
+    fields.append(el("dt", "", "图纸执行要求"), el("dd", "", item.requirement), el("dt", "", "规范要求"), el("dd", "", item.conflict.specificationRequirement));
+    panel.append(fields, el("p", "", item.conflict.reason)); return panel;
   }
   const uniqueText = values => [...new Set(values.map(value => str(value).trim()).filter(Boolean))];
   const specificationTitle = meta => uniqueText([meta?.number, meta?.version]).join(" · ");
@@ -58,7 +74,7 @@
     const when = spec.createdAt && !Number.isNaN(created.getTime()) ? `建立于 ${new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(created)}` : "建立时间未记录";
     return (batchFirst ? [batch, when] : [when, batch]).filter(Boolean).join(" · ");
   }
-  const specListKey = () => JSON.stringify([state.specId, state.specifications.map(({ id, status, sourceSha256, name, metadata, ruleCount, recordCount, informationSummary, classification, warningsCount, createdAt }) => ({ id, status, sourceSha256, name, metadata, ruleCount, recordCount, informationSummary, classification, warningsCount, createdAt }))]);
+  const specListKey = () => JSON.stringify([state.specId, state.specifications.map(({ id, status, sourceSha256, name, metadata, ruleCount, recordCount, informationSummary, classification, warningsCount, createdAt, scopePolicy, inspectionCount, comparisonCount }) => ({ id, status, sourceSha256, name, metadata, ruleCount, recordCount, informationSummary, classification, warningsCount, createdAt, scopePolicy, inspectionCount, comparisonCount }))]);
 
   async function api(url, options = {}) {
     const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 25000);
@@ -130,7 +146,7 @@
       else if (ctx.batchId && ctx.drawingId) url = `/api/drawing-batches/${enc(ctx.batchId)}/drawings/${enc(ctx.drawingId)}/file`;
       const page = Number(source.page); if (url && Number.isInteger(page) && page > 0) url += `#page=${page}`;
       head.append(url ? sourceLink(source.file || "原始 PDF", url) : el("span", "", source.file || "来源文件"), el("span", "", `物理页 ${str(source.page, "—")}`));
-      if (source.verification) head.append(el("span", "", ({ text_match: "引文可定位", visual_review: "图像证据待核对", unmatched_quote: "引文待核对", invalid_location: "来源待核对" })[source.verification] || "来源待核对"));
+      if (source.verification) head.append(el("span", "", ({ text_match: "引文可定位", visual_review: "图像识读", unmatched_quote: "引文待核对", invalid_location: "来源待核对" })[source.verification] || "来源待核对"));
       item.append(head, el("blockquote", "", source.quote)); if (source.section) item.append(el("div", "source-location", `条款 / 位置：${source.section}`)); body.append(item);
     }
     if (!rows.length) body.append(el("p", "placeholder", "未提供可定位证据，请核对。"));
@@ -188,7 +204,7 @@
       const meta = spec.metadata || {}; item.append(el("strong", "", specificationTitle(meta) || spec.name || "技术规范"), el("small", "", meta.title || spec.name || ""), badge(spec.status));
       if (spec.status === "completed") {
         const counts = spec.informationSummary;
-        item.append(el("small", "", counts ? `制造与检验 ${counts.core ?? 0} · 采购交付 ${counts.procurement ?? 0} · 背景 ${counts.context ?? 0}` : `共 ${spec.recordCount ?? spec.ruleCount ?? 0} 条历史记录 · 分类待确认`));
+        item.append(el("small", "", spec.scopePolicy === "drawing-plus-inspection-v1" ? `检验候选 ${spec.inspectionCount ?? "—"} · 对照依据 ${spec.comparisonCount ?? "—"}` : counts ? `历史记录 ${counts.total ?? spec.recordCount ?? 0} 条` : `共 ${spec.recordCount ?? spec.ruleCount ?? 0} 条历史记录`));
         if (counts?.unclassified) item.append(el("small", "", `另有 ${counts.unclassified} 条待分类`));
         if (spec.classification?.pending) item.append(el("small", "classification-list-note", "信息分类仍有待确认项"));
       }
@@ -215,12 +231,13 @@
     return state.specRequests.get(id);
   }
   function updateSpecSummary(job) {
-    state.specifications = state.specifications.map(spec => spec.id === job.id ? { ...spec, status: job.status, message: job.message, ...(job.result ? { metadata: job.result.metadata, ruleCount: job.result.informationSummary?.actionable ?? list(job.result.rules).length, recordCount: list(job.result.rules).length, informationSummary: job.result.informationSummary, classification: job.result.classification, warningsCount: list(job.result.warnings).length } : {}) } : spec);
+    state.specifications = state.specifications.map(spec => spec.id === job.id ? { ...spec, status: job.status, message: job.message, ...(job.result ? { metadata: job.result.metadata, scopePolicy: job.result.scopePolicy, inspectionCount: list(job.result.rules).filter(rule => rule.usage === "inspection").length, comparisonCount: list(job.result.rules).filter(rule => rule.usage === "comparison").length, ruleCount: job.result.informationSummary?.actionable ?? list(job.result.rules).length, recordCount: list(job.result.rules).length, informationSummary: job.result.informationSummary, classification: job.result.classification, warningsCount: list(job.result.warnings).length } : {}) } : spec);
     if (state.specListKey !== specListKey()) renderSpecList();
   }
   function renderRule(rule, specId) {
     const card = el("article", "rule-card"), top = el("div", "item-top");
-    top.append(el("span", "item-id", rule.id), informationTag(rule), el("span", "item-category", rule.category), el("span", "item-strength", strengthNames[rule.strength] || rule.strength || ""));
+    top.append(el("span", "item-id", rule.id), rule.usage ? el("span", "usage-tag", rule.usage === "inspection" ? "检验候选" : "仅用于对照") : informationTag(rule), el("span", "item-category", rule.category), el("span", "item-strength", strengthNames[rule.strength] || rule.strength || ""));
+    if (rule.processCategory) top.append(processTag(rule));
     if (needsReview(rule)) top.append(el("span", "status-tag warning", "待确认"));
     card.append(top, el("p", "item-text", rule.requirement));
     const params = parameters(rule.parameters); if (params) card.append(params);
@@ -230,22 +247,24 @@
   }
   function renderSpec(job) {
     const holder = $("spec-detail"); holder.replaceChildren(); const result = job.result, meta = result?.metadata || {};
+    const scoped = drawingScope(result), usageNames = { inspection: "用于补充的检验要求", comparison: "仅用于冲突对照", all: "全部规范依据" };
     const head = el("div", "detail-title"), names = el("div"); names.append(el("h3", "", meta.title || job.name || "技术规范"), el("div", "detail-subtitle", uniqueText([meta.number, meta.version && meta.version !== meta.number ? `版本 ${meta.version}` : !meta.version && result ? "版本未识别，待确认" : ""]).join(" · ")), el("div", "detail-subtitle creation-meta", creationLabel(job))); head.append(names, badge(job.status)); holder.append(head);
-    const progress = statusBox(job.status === "completed" && result ? { ...job, message: `规范解析已完成：共 ${list(result.rules).length} 条资料记录，含采购交付及背景；默认查看制造与检验。` } : job); progress.id = "spec-progress-status"; holder.append(progress);
+    const progress = statusBox(job.status === "completed" && result ? { ...job, message: scoped ? `规范解析已完成：${list(result.rules).filter(rule => rule.usage === "inspection").length} 条检验候选，${list(result.rules).filter(rule => rule.usage === "comparison").length} 条对照依据。` : `历史规范记录：共 ${list(result.rules).length} 条，采用原提取口径。` } : job); progress.id = "spec-progress-status"; holder.append(progress);
     const links = el("div", "detail-links"); links.append(sourceLink("打开规范原文 ↗", `/api/specifications/${enc(job.id)}/file`));
     if (result) { const exportButton = el("button", "text-button", "导出完整规范 JSON"); exportButton.type = "button"; exportButton.addEventListener("click", () => download(JSON.stringify(result, null, 2), `${specificationTitle(meta) || "技术规范"}-完整规范记录.json`, "application/json;charset=utf-8")); links.append(exportButton); } holder.append(links);
     if (!result) { if (job.status === "failed") holder.append(el("p", "notice", "本次未生成可用规范库。请根据错误处理后重新上传；已完成的其他版本仍可使用。")); return; }
     const rules = list(result.rules), counts = informationSummary(rules);
-    holder.append(stats([["直接制造约束", counts.manufacturing], ["质量与检验", counts.quality], ["采购与交付", counts.procurement], ["背景说明", counts.context]]), informationNote(rules));
+    if (scoped) holder.append(stats([["检验候选", rules.filter(rule => rule.usage === "inspection").length], ["对照依据", rules.filter(rule => rule.usage === "comparison").length], ["待复核", rules.filter(needsReview).length]]), el("p", "information-note", "最终工艺列表以图纸为准，补充适用的规范检验要求；其他规范条款仅作冲突对照，不自动进入工艺列表。"));
+    else holder.append(stats([["直接制造约束", counts.manufacturing], ["质量与检验", counts.quality], ["采购与交付", counts.procurement], ["背景说明", counts.context]]), informationNote(rules));
     if (meta.scope) holder.append(el("p", "detail-scope", meta.scope));
     if (list(meta.excludedProcesses).length) holder.append(el("p", "rule-note", `排除范围：${list(meta.excludedProcesses).join("；")}`));
     if (meta.priorityPolicy) holder.append(el("p", "rule-note", `优先关系：${meta.priorityPolicy}`));
     const warn = warnings(result.warnings); if (warn) holder.append(warn); const cov = coverage(result.sourceCoverage, result.review); if (cov) holder.append(cov);
-    const panel = details(`分层查看规范 · ${rules.length} 条记录`), input = el("input", "search-input"), scope = el("select", "information-select"); input.type = "search"; input.placeholder = "搜索要求、适用条件、例外、原文…"; input.setAttribute("aria-label", "搜索规范记录");
+    const panel = details(`${scoped ? "查看规范依据" : "查看历史规范"} · ${rules.length} 条记录`), input = el("input", "search-input"), scope = el("select", "information-select"); input.type = "search"; input.placeholder = "搜索要求、适用条件、例外、原文…"; input.setAttribute("aria-label", "搜索规范记录");
     scope.setAttribute("aria-label", "按规范信息类型筛选");
-    for (const value of ["core", "manufacturing", "quality", "procurement", "context", "unclassified", "all"]) { const option = el("option", "", scopeNames[value]); option.value = value; scope.append(option); }
+    for (const value of scoped ? ["inspection", "comparison", "all"] : ["core", "manufacturing", "quality", "procurement", "context", "unclassified", "all"]) { const option = el("option", "", scoped ? usageNames[value] : scopeNames[value]); option.value = value; scope.append(option); }
     const controls = el("div", "information-controls"), count = el("p", "panel-note"), rows = el("div", "rule-list"); controls.append(scope, input);
-    const render = () => { const keyword = input.value.trim().toLocaleLowerCase(), scoped = rules.filter(rule => inScope(rule, scope.value)), filtered = scoped.filter(rule => !keyword || JSON.stringify(rule).toLocaleLowerCase().includes(keyword)); rows.replaceChildren(); count.textContent = `当前：${scopeNames[scope.value]}，显示 ${filtered.length} / ${scoped.length} 条记录。具体是否适用仍由每张图纸分别判断。`; filtered.forEach(rule => rows.append(renderRule(rule, job.id))); if (!filtered.length) rows.append(el("p", "empty-inline", "当前信息类型没有匹配记录，可切换类型或调整关键词。")); };
+    const render = () => { const keyword = input.value.trim().toLocaleLowerCase(), selected = rules.filter(rule => scoped ? scope.value === "all" || rule.usage === scope.value : inScope(rule, scope.value)), filtered = selected.filter(rule => !keyword || JSON.stringify(rule).toLocaleLowerCase().includes(keyword)); rows.replaceChildren(); count.textContent = `当前：${scoped ? usageNames[scope.value] : scopeNames[scope.value]}，显示 ${filtered.length} / ${selected.length} 条记录。具体是否适用仍由每张图纸分别判断。`; filtered.forEach(rule => rows.append(renderRule(rule, job.id))); if (!filtered.length) rows.append(el("p", "empty-inline", "当前类型没有匹配记录，可切换类型或调整关键词。")); };
     input.addEventListener("input", render); scope.addEventListener("change", render); panel.body.append(controls, count, rows); holder.append(panel.node); render();
   }
   async function selectSpec(id) {
@@ -274,7 +293,7 @@
         groups.get(key).push({ ...drawing, batchId: batch.id, specificationId, stage: batch.stage });
       }
     }
-    return [...groups.values()].map(attempts => attempts.find(drawing => drawing.hasResult) || attempts[0]);
+    return [...groups.values()].map(attempts => attempts[0]);
   }
   function renderSavedDrawings() {
     const holder = $("saved-drawings-list"), count = $("saved-drawings-count"); holder.replaceChildren();
@@ -346,13 +365,16 @@
   }
   function renderRequirement(item, ctx) {
     const row = el("tr", "requirement-row"), name = el("th", "requirement-name", item.category), metric = el("td", "requirement-metric"); name.scope = "row";
-    metric.append(el("p", "item-text", item.requirement));
+    if (item.processCategory) name.append(el("br"), processTag(item));
+    if (conflictKind(item)) { row.classList.add(`has-${conflictKind(item)}`); name.append(el("br"), el("span", `conflict-tag ${conflictKind(item)}`, conflictKind(item) === "conflict" ? "要求冲突" : "图纸覆盖")); }
+    const conflict = conflictPanel(item); metric.append(conflict || el("p", "item-text", item.requirement));
     const detail = details(needsReview(item) ? "查看依据与条件 · 待确认" : "查看依据与条件"); detail.node.classList.add("requirement-details");
-    const top = el("div", "item-top"); top.append(el("span", "item-id", item.id), informationTag(item), el("span", "origin-tag", originNames[item.origin] || item.origin)); if (needsReview(item)) top.append(el("span", "status-tag warning", "待确认")); detail.body.append(top);
+    const top = el("div", "item-top"); top.append(el("span", "item-id", item.id), item.processCategory ? processTag(item) : informationTag(item), el("span", "origin-tag", originNames[item.origin] || item.origin)); if (needsReview(item)) top.append(el("span", "status-tag warning", "待复核")); detail.body.append(top);
     const classification = classificationExplanation(item); if (classification) detail.body.append(classification); if (item.scope) detail.body.append(el("p", "item-scope", `适用：${item.scope}`));
     const params = parameters(item.parameters); if (params) detail.body.append(params); if (list(item.ruleIds).length) detail.body.append(el("p", "rule-refs", `关联规范规则：${list(item.ruleIds).join("、")}`)); if (item.review_note) detail.body.append(el("p", "review-note", item.review_note)); detail.body.append(evidence(item.sources, ctx)); metric.append(detail.node); row.append(name, metric); return row;
   }
   function dispositionPanel(result, ctx) {
+    if (drawingScope(result)) return inspectionDispositionPanel(result, ctx);
     const boundId = result.specification?.id || state.batch?.specificationId;
     const ruleTypes = state.specJob?.id === boundId ? new Map(list(state.specJob.result?.rules).map(rule => [rule.id, rule.informationType])) : new Map();
     const rows = list(result.dispositions).map(row => ({ ...row, informationType: row.informationType || ruleTypes.get(row.ruleId) })), panel = details("规范适用处置 · 背景另列");
@@ -368,6 +390,16 @@
       if (!filtered.length) holder.append(el("p", "empty-inline", "当前类型没有匹配的规则处置记录。"));
     };
     search.addEventListener("input", render); filter.addEventListener("change", render); scope.addEventListener("change", render); controls.append(search, scope, filter); panel.body.append(counters, note, controls, holder); render(); return panel.node;
+  }
+  function inspectionDispositionPanel(result, ctx) {
+    const boundId = result.specification?.id || state.batch?.specificationId;
+    const usages = state.specJob?.id === boundId ? new Map(list(state.specJob.result?.rules).map(rule => [rule.id, rule.usage])) : new Map();
+    const rows = list(result.dispositions).filter(row => (row.usage || usages.get(row.ruleId)) !== "comparison");
+    const panel = details(`规范检验适用性 · ${rows.length} 条`), controls = el("div", "disposition-controls"), search = el("input"), filter = el("select"), holder = el("div", "disposition-list");
+    search.type = "search"; search.placeholder = "搜索检验规则编号或处置原因…"; search.setAttribute("aria-label", "搜索规则处置"); filter.setAttribute("aria-label", "按规则处置筛选");
+    for (const [value, name] of [["", "全部处置"], ...Object.entries(dispositionNames)]) { const option = el("option", "", name); option.value = value; filter.append(option); }
+    const render = () => { const keyword = search.value.trim().toLocaleLowerCase(), selected = rows.filter(row => (!filter.value || row.status === filter.value) && (!keyword || JSON.stringify(row).toLocaleLowerCase().includes(keyword))); holder.replaceChildren(); for (const row of selected) { const item = el("div", "disposition-row"), top = el("div", "item-top"); top.append(el("span", "item-id", row.ruleId), el("span", `disposition-status ${row.status}`, dispositionNames[row.status] || row.status)); item.append(top, el("p", "", row.reason), evidence(row.evidence, ctx)); holder.append(item); } if (!selected.length) holder.append(el("p", "empty-inline", "没有匹配的检验处置记录。")); };
+    controls.append(search, filter); search.addEventListener("input", render); filter.addEventListener("change", render); panel.body.append(el("p", "panel-note", "检验规则逐条判断是否适用；仅作冲突对照的规范条款不要求生成最终工艺项。"), controls, holder); render(); return panel.node;
   }
   function pendingIssues(result) {
     const values = [...list(result.drawing?.uncertainties).map(str), ...list(result.dispositions).filter(row => row.status === "needs_confirmation").map(row => `${row.ruleId}：${row.reason}`), ...list(result.warnings).map(str)]; return [...new Set(values.filter(Boolean))];
@@ -414,7 +446,8 @@
   function renderDrawing(drawing) {
     const holder = $("drawing-result"); holder.replaceChildren(); if (!drawing) return;
     if (!drawing.result) { holder.append(statusBox(drawing)); holder.append(el("p", "notice", drawing.status === "failed" ? "这张图纸未生成可用结果。可沿用原图纸和规范版本，单独重试这个零件。其他已完成零件可分别查看。" : "每个零件独立处理，当前图纸的要求将在完成后显示。")); const retry = retryAction(drawing); if (retry) holder.append(retry); return; }
-    const result = drawing.result, profile = result.drawing || {}, ctx = context(result, drawing), items = list(result.requirements);
+    const result = drawing.result, profile = result.drawing || {}, ctx = context(result, drawing), items = list(result.requirements), scoped = drawingScope(result);
+    if (scoped && !["core", "all", "review", "conflict", "override", ...processNames.map(name => `process:${name}`)].includes(state.filter)) state.filter = "core";
     list(result.warnings).filter(note => str(note).startsWith("【原图复核】")).forEach(note => holder.append(el("p", "review-note", note)));
     const card = el("div", "profile"); card.append(el("h3", "", profile.name || drawing.name));
     const meta = el("div", "profile-meta"); for (const [label, value] of [["图号", profile.partNumber], ["版本", profile.revision], ["材料", profile.material], ["材料形态", profile.materialForm], ["制造方法", profile.process], ["类别", profile.castingClass], ["气密", ({ required: "有要求", not_required: "明确无要求", unspecified: "未明确" })[profile.airtightness]], ["尺寸状态", ({ before_finish: "表面处理前", after_finish: "表面处理后", unspecified: "未明确" })[profile.dimensionState]]]) { if (value) { const entry = el("span", "", label); entry.append(el("strong", "", value)); meta.append(entry); } } card.append(meta);
@@ -424,24 +457,27 @@
     if (list(profile.references).length) card.append(el("p", "", `图纸引用：${list(profile.references).join("；")}`));
     if (list(profile.facts).length) { const facts = details(`图纸事实与依据 · ${profile.facts.length} 项`), grid = el("div", "profile-facts"); profile.facts.forEach(fact => { const item = el("div", "profile-fact"); item.append(el("strong", "", fact.name), el("p", "", fact.value), evidence(fact.sources, ctx)); grid.append(item); }); facts.body.append(grid); card.append(facts.node); }
     const typeCounts = informationSummary(items);
-    holder.append(card, stats([["直接制造约束", typeCounts.manufacturing], ["质量与检验", typeCounts.quality], ["采购与交付", typeCounts.procurement], ["背景说明", typeCounts.context]]), informationNote(items));
+    holder.append(card);
+    if (scoped) holder.append(stats([["工艺要求", items.length], ["检验要求", items.filter(item => processCategory(item) === "检验").length], ["要求冲突", items.filter(item => conflictKind(item) === "conflict").length], ["待复核", items.filter(needsReview).length]]), el("p", "information-note", "图纸要求＋适用的规范检验要求；按铸造、机加、热处理、表面处理、刻字、检验、焊接、其他分类。材料要求归“其他”。"));
+    else holder.append(stats([["直接制造约束", typeCounts.manufacturing], ["质量与检验", typeCounts.quality], ["采购与交付", typeCounts.procurement], ["背景说明", typeCounts.context]]), informationNote(items));
     const cov = coverage(result.sourceCoverage, result.review); if (cov) holder.append(cov); holder.append(dispositionPanel(result, ctx));
     const warn = warnings(result.warnings, "零件提示"); if (warn) holder.append(warn);
     const toolbar = el("div", "result-toolbar"), tabs = el("div", "filter-tabs"), search = el("input", "result-search"); tabs.setAttribute("role", "group"); tabs.setAttribute("aria-label", "按要求类型筛选"); search.type = "search"; search.placeholder = "搜索要求、参数、原文…"; search.setAttribute("aria-label", "搜索零件要求"); search.value = state.search;
-    const pending = pendingIssues(result), pendingPanel = details(`跨类别条件与引用提示 · ${pending.length} 项`), pendingList = el("ul", "warning-list"); pending.forEach(issue => pendingList.append(el("li", "", issue))); pendingPanel.body.append(el("p", "panel-note", "这里保留完整资料的条件和引用疑点，可能涉及采购、交付或背景；不计入制造与检验待确认条数。"), pendingList);
+    const pending = pendingIssues(result), pendingPanel = details(`条件与引用提示 · ${pending.length} 项`), pendingList = el("ul", "warning-list"); pending.forEach(issue => pendingList.append(el("li", "", issue))); pendingPanel.body.append(el("p", "panel-note", scoped ? "保留零件事实、适用条件及引用文件中的具体疑点。" : "这里保留历史资料的条件和引用疑点，不计入制造与检验待确认条数。"), pendingList);
     const counts = { core: items.filter(core).length, manufacturing: typeCounts.manufacturing, quality: typeCounts.quality, review: items.filter(item => core(item) && needsReview(item)).length, procurement: typeCounts.procurement, context: typeCounts.context, unclassified: typeCounts.unclassified, all: items.length };
     const tableWrap = el("div", "requirements-table-wrap"), table = el("table", "requirements-table"), head = el("thead"), headRow = el("tr"), rowHolder = el("tbody"), caption = el("div", "visible-caption");
     table.setAttribute("aria-label", "零件工艺要求"); for (const title of ["工艺要求的名称", "量化指标"]) { const cell = el("th", "", title); cell.scope = "col"; headRow.append(cell); } head.append(headRow); table.append(head, rowHolder); tableWrap.append(table);
     const render = () => {
-      const filtered = filteredRequirements(result), scopedCount = items.filter(item => inScope(item, state.filter)).length;
+      const filtered = filteredRequirements(result), scopedCount = items.filter(item => scoped ? processScope(item, state.filter) : inScope(item, state.filter)).length;
       rowHolder.replaceChildren(); filtered.forEach(item => rowHolder.append(renderRequirement(item, ctx))); if (!filtered.length) { const row = el("tr"), cell = el("td", "no-results", "当前信息类型没有匹配记录，可调整关键词或切换类型。"); cell.colSpan = 2; row.append(cell); rowHolder.append(row); }
-      caption.replaceChildren(el("span", "", `当前：${scopeNames[state.filter] || "制造与检验"}，显示 ${filtered.length} / ${scopedCount} 条记录`), el("span", "", "两列呈现 · 展开查看依据与条件"));
+      caption.replaceChildren(el("span", "", `当前：${scoped ? processLabel(state.filter) : scopeNames[state.filter] || "制造与检验"}，显示 ${filtered.length} / ${scopedCount} 条记录`), el("span", "", "两列呈现 · 展开查看依据与条件"));
       tabs.querySelectorAll("button").forEach(button => { const chosen = button.dataset.filter === state.filter; button.classList.toggle("active", chosen); button.setAttribute("aria-pressed", str(chosen)); });
       $("export-csv").textContent = "导出当前筛选 CSV";
     };
-    for (const [value, label] of [["core", "制造与检验"], ["manufacturing", "制造约束"], ["quality", "质量与检验"], ["review", "核心待确认"], ["procurement", "采购交付"], ["context", "背景说明"], ["all", "全部记录"]]) { const button = el("button", "filter-tab", label); button.type = "button"; button.dataset.filter = value; button.append(el("span", "", counts[value])); button.addEventListener("click", () => { state.filter = value; render(); }); tabs.append(button); }
+    const filters = scoped ? [["core", "全部工艺"], ...processNames.map(name => [`process:${name}`, name]), ["conflict", "要求冲突"], ["override", "图纸覆盖"], ["review", "待复核"]] : [["core", "制造与检验"], ["manufacturing", "制造约束"], ["quality", "质量与检验"], ["review", "核心待确认"], ["procurement", "采购交付"], ["context", "背景说明"], ["all", "全部记录"]];
+    for (const [value, label] of filters) { const button = el("button", "filter-tab", label); button.type = "button"; button.dataset.filter = value; button.append(el("span", "", scoped ? items.filter(item => processScope(item, value)).length : counts[value])); button.addEventListener("click", () => { state.filter = value; render(); }); tabs.append(button); }
     search.addEventListener("input", () => { state.search = search.value; render(); }); toolbar.append(tabs, search);
-    holder.append(el("p", "information-note", "默认查看直接制造约束和质量、检验要求。性能、缺陷、公差等属于验收目标，不等同于加工操作步骤；采购交付与背景可单独查看。"));
+    holder.append(el("p", "information-note", scoped ? "图纸中的要求作为执行依据，规范补充适用的检验要求。红色突出要求冲突，黄色说明图纸覆盖；展开可对照双方原文。" : "此为历史提取口径，可按原分类查看资料。"));
     if (pending.length) holder.append(pendingPanel.node);
     holder.append(toolbar, caption, tableWrap, el("p", "result-footnote", "本页用于核对资料中的制造约束与检验目标，不生成已批准的操作规程或完整工艺路线。请结合原图确认适用条件和疑点；本结果不直接判定产品合格。")); render();
   }
@@ -490,7 +526,7 @@
     const result = currentResult(); if (!result) return;
     const quote = value => { let text = str(value); if (/^[\s]*[=+\-@]/.test(text)) text = "'" + text; return `"${text.replace(/"/g, '""')}"`; };
     const rows = [["工艺要求的名称", "量化指标"], ...filteredRequirements(result).map(item => [item.category, item.requirement])];
-    download("\ufeff" + rows.map(row => row.map(quote).join(",")).join("\r\n"), `${result.drawing?.partNumber || "零件"}-${scopeNames[state.filter] || "当前筛选"}.csv`, "text/csv;charset=utf-8");
+    download("\ufeff" + rows.map(row => row.map(quote).join(",")).join("\r\n"), `${result.drawing?.partNumber || "零件"}-${drawingScope(result) ? processLabel(state.filter) : scopeNames[state.filter] || "当前筛选"}.csv`, "text/csv;charset=utf-8");
   }
 
   $("spec-file").addEventListener("change", updateControls);
@@ -515,7 +551,7 @@
   $("refresh-drawings").addEventListener("click", () => refreshSavedDrawings(state.specId, { open: !state.batch }).catch(error => showAlert(error.message)));
   $("refresh-specs").addEventListener("click", async () => { try { await refreshSpecs(); if (state.specId) await selectSpec(state.specId); } catch (error) { showAlert(error.message); } });
   $("dismiss-alert").addEventListener("click", clearAlert); $("export-csv").addEventListener("click", exportCsv);
-  $("export-json").addEventListener("click", () => { const result = currentResult(); if (result) download(JSON.stringify({ ...result, exportScope: { kind: "all_records", note: "完整资料，含采购交付、背景及待分类记录；以informationType区分，不全部视为工艺要求。" } }, null, 2), `${result.drawing?.partNumber || "零件"}-完整资料.json`, "application/json;charset=utf-8"); });
+  $("export-json").addEventListener("click", () => { const result = currentResult(); if (result) download(JSON.stringify({ ...result, exportScope: { kind: "all_records", note: drawingScope(result) ? "全部零件要求，保留八类分类、冲突、来源和复核说明；最终范围为图纸要求加适用规范检验。" : "历史完整资料，保留原信息分类。" } }, null, 2), `${result.drawing?.partNumber || "零件"}-完整资料.json`, "application/json;charset=utf-8"); });
   const dialog = $("guide-dialog"); $("guide-button").addEventListener("click", () => dialog.showModal()); $("close-guide").addEventListener("click", () => dialog.close()); $("guide-done").addEventListener("click", () => dialog.close()); dialog.addEventListener("click", event => { if (event.target === dialog) { const bounds = dialog.getBoundingClientRect(); if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close(); } });
   window.addEventListener("beforeunload", () => clearTimeout(state.pollTimer));
   async function initialize() {

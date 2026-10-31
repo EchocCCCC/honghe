@@ -190,33 +190,44 @@ def prepare_documents(files, directory, *, render_images=True, detail_mode=False
                     scale = 5200 if detail_mode else 2600
                     crop_width = _js_round(pixel_width * scale / 2600)
                     crop_height = _js_round(pixel_height * scale / 2600)
-                    half_width, half_height = math.ceil(crop_width / 2), math.ceil(crop_height / 2)
+                    # One physical page can use nine smaller tiles within the
+                    # twelve-image drawing limit. Multiple pages keep four per
+                    # page; every valid input file has at least one page.
+                    grid = 3 if detail_mode and len(files) == 1 and page_count == 1 else 2
+                    tile_width, tile_height = math.ceil(crop_width / grid), math.ceil(crop_height / grid)
                     overlap = 100 if detail_mode else 0
-                    for tile in range(4):
-                        x = max(0, (tile % 2) * half_width - overlap)
-                        y = max(0, (tile // 2) * half_height - overlap)
+                    for tile in range(grid * grid):
+                        column, row = tile % grid, tile // grid
+                        x = max(0, column * tile_width - overlap)
+                        y = max(0, row * tile_height - overlap)
+                        position = POSITIONS[tile] if grid == 2 else f"第{row + 1}行第{column + 1}列"
                         target = str(prefix) + f"-tile-{tile + 1}"
                         try:
                             image, _ = _render(file, page, target, scale=scale,
-                                               crop=(x, y, min(half_width + overlap * 2, crop_width - x),
-                                                     min(half_height + overlap * 2, crop_height - y)))
+                                               crop=(x, y, min(tile_width + overlap * 2, crop_width - x),
+                                                     min(tile_height + overlap * 2, crop_height - y)))
                             descriptor["imagePaths"].append(image)
                             images.append(image)
-                            all_text += f"[同页局部放大图：{Path(target).name}.png，位置{POSITIONS[tile]}；来源仍为物理页{page}。]\n"
+                            all_text += f"[同页局部放大图：{Path(target).name}.png，位置{position}；来源仍为物理页{page}。]\n"
                         except Exception:
                             if page not in doc["needsVisualReview"]:
                                 doc["needsVisualReview"].append(page)
-                            warnings.append(f'{file["name"]} 第{page}页：{POSITIONS[tile]}局部图生成失败，请核对原图细节。')
+                            warnings.append(f'{file["name"]} 第{page}页：{position}局部图生成失败，请核对原图细节。')
                     if detail_mode:
                         target = str(prefix) + "-focus-left-lower"
-                        y = max(0, half_height - overlap)
+                        # Include the complete lower-left identity chain, not
+                        # an isolated value cell. Keep portrait crops within
+                        # Pi's image limit without resizing the rendered pixels.
+                        focus_scale = min(7800, math.floor(math.floor(2000 / 0.30) * 2600 / pixel_height))
+                        focus_width = _js_round(pixel_width * focus_scale / 2600)
+                        focus_height = _js_round(pixel_height * focus_scale / 2600)
+                        y = math.floor(focus_height * 0.70)
                         try:
-                            image, _ = _render(file, page, target, scale=scale,
-                                               crop=(0, y, min(math.ceil(crop_width / 4) + overlap, crop_width),
-                                                     crop_height - y))
+                            image, _ = _render(file, page, target, scale=focus_scale,
+                                               crop=(0, y, math.ceil(focus_width * 0.09), focus_height - y))
                             descriptor["imagePaths"].append(image)
                             images.append(image)
-                            all_text += f"[同页边栏聚焦图：{Path(target).name}.png，位置左下边栏；仅补充放大证据，不预判字段排列；来源仍为物理页{page}。]\n"
+                            all_text += f"[同页边栏聚焦图：{Path(target).name}.png，位置左下完整身份链，包含连续值格与标签格；仅提供原件像素，请核对格线关系，其他字段仍见整图及同页局部图；来源仍为物理页{page}。]\n"
                         except Exception:
                             if page not in doc["needsVisualReview"]:
                                 doc["needsVisualReview"].append(page)

@@ -5,7 +5,7 @@ import { ROOT } from './config.js';
 
 const modes = {
   'specification-rule-parser': ['extract', 'audit', 'classify'],
-  'drawing-requirements-matcher': ['match', 'audit'],
+  'drawing-requirements-matcher': ['read', 'match', 'audit'],
 };
 const paths = ['SKILL.md', 'references/protocol.md'];
 const hash = text => createHash('sha256').update(text).digest('hex');

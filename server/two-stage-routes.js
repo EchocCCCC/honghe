@@ -3,7 +3,7 @@ import multer from 'multer';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { ACTIONABLE_TYPES, informationSummary, readInformationView, decorateDispositions } from './information-types.js';
+import { ACTIONABLE_TYPES, informationSummary, readInformationView, decorateDispositions, usesDrawingScope, inheritableRules, ruleUsageSummary } from './information-types.js';
 import { RUNTIME, config, MODEL_ID, safeError } from './config.js';
 import { buildSpecification, matchDrawing, specificationFingerprint, SPEC_SKILL, digest } from './two-stage-pipeline.js';
 import { loadSkillBundle, freezeSkillBundle } from './skills.js';
@@ -69,9 +69,11 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
     if (view) {
       publicJob.informationSummary = view.informationSummary;
       publicJob.classification = view.classification;
-      publicJob.ruleCount = view.informationSummary.actionable;
+      publicJob.ruleCount = usesDrawingScope(view) ? inheritableRules(view).length : view.informationSummary.actionable;
       publicJob.recordCount = view.informationSummary.total;
+      if (usesDrawingScope(view)) Object.assign(publicJob, { scopePolicy: view.scopePolicy, ...ruleUsageSummary(view.rules) });
       if (job.status === 'completed') publicJob.message = `制造与检验${view.informationSummary.core}项；采购交付${view.informationSummary.procurement}项；背景说明${view.informationSummary.context}项${view.informationSummary.unclassified ? `；未归类${view.informationSummary.unclassified}项` : ''}`;
+      if (job.status === 'completed' && usesDrawingScope(view)) publicJob.message = `可补充检验${publicJob.inspectionCount}项；冲突对照${publicJob.comparisonCount}项`;
     }
     if (!detail) {
       delete publicJob.result;
@@ -85,10 +87,10 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
   async function publicBatch(job) {
     const spec = await find('specifications', job.specificationId);
     const specification = await readInformationView(root, spec?.result);
-    return { ...job, ...(specification ? { specification: { ...job.specification, informationSummary: specification.informationSummary, ruleCount: specification.informationSummary.actionable, recordCount: specification.informationSummary.total } } : {}), drawings: await Promise.all(job.drawings.map(async ({ file, ...drawing }) => {
+    return { ...job, ...(specification ? { specification: { ...job.specification, informationSummary: specification.informationSummary, ruleCount: usesDrawingScope(specification) ? inheritableRules(specification).length : specification.informationSummary.actionable, recordCount: specification.informationSummary.total, ...(usesDrawingScope(specification) ? { scopePolicy: specification.scopePolicy, ...ruleUsageSummary(specification.rules) } : {}) } } : {}), drawings: await Promise.all(job.drawings.map(async ({ file, ...drawing }) => {
       if (!drawing.result) return drawing;
       const result = decorateDispositions(await readInformationView(root, drawing.result), specification);
-      return { ...drawing, result, ...(drawing.status === 'completed' ? { message: `完成：制造与检验${result.informationSummary.core}项；采购交付${result.informationSummary.procurement}项；背景说明${result.informationSummary.context}项` } : {}) };
+      return { ...drawing, result, ...(drawing.status === 'completed' ? { message: usesDrawingScope(result) ? `完成：${result.requirements.length}项图纸要求与规范检验要求` : `完成：制造与检验${result.informationSummary.core}项；采购交付${result.informationSummary.procurement}项；背景说明${result.informationSummary.context}项` } : {}) };
     })) };
   }
   function batchSummary(job) {
@@ -119,7 +121,10 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
   function enqueueDrawing(job, drawing, spec, options = {}) {
     queue.add(async () => {
       const target = directory('drawing-batches', job.id), child = path.join(target, drawing.id);
+      const runDirectory = options.retryId ? path.join(child, 'attempts', options.retryId) : child;
       try {
+        await fs.mkdir(runDirectory, { recursive: true });
+        drawing.attemptId = options.retryId || '';
         job.status = 'running'; drawing.status = 'preparing'; drawing.message = '读取本零件原图与高分辨率局部'; await persist('drawing-batches', job);
         let initialRun;
         if (options.reuseMatching) {
@@ -130,7 +135,7 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
           } catch { /* An incomplete initial generation is rerun, never repaired as JSON. */ }
         }
         const specificationView = await readInformationView(root, spec.result);
-        drawing.result = await match({ file: drawing.file, directory: child, specificationJob: { ...spec, result: specificationView }, specificationDirectory: directory('specifications', spec.id), stage: job.stage,
+        drawing.result = await match({ file: drawing.file, directory: runDirectory, specificationJob: { ...spec, result: specificationView }, specificationDirectory: directory('specifications', spec.id), stage: job.stage,
           initialRun, retryId: options.retryId || '', onProgress: (status, message) => { drawing.status = status; drawing.message = message; job.message = `${job.drawings.filter(d => d.status === 'completed').length}/${job.drawings.length}个零件完成；${drawing.name}：${message}`; } });
         drawing.status = 'completed'; drawing.message = `完成：${drawing.result.requirements.length}条要求`; delete drawing.error;
       } catch (error) { drawing.status = 'failed'; drawing.error = safeError(error); drawing.message = '本零件处理失败；其他零件继续'; }
@@ -165,7 +170,7 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
           job.result = await build({ file, directory: target, skill, onProgress: (status, message) => { job.status = status; job.message = message; } });
           const runs = [...(job.result.run?.extractionRuns || []), ...(job.result.review?.runs || [])];
           if (runs.some(run => run.skillBundleSha256 !== fingerprint.parserSha256)) throw new Error('规范调用的Skill资料快照与缓存指纹不一致，拒绝保存为可用规则库');
-          job.status = 'completed'; job.message = `规范库已建立：${job.result.informationSummary?.core ?? job.result.rules.length}项制造与检验要求，请核对分类与原文疑点`;
+          job.status = 'completed'; job.message = usesDrawingScope(job.result) ? `规范库已建立：${job.result.inspectionCount}项检验依据，${job.result.comparisonCount}项冲突对照` : `规范库已建立：${job.result.informationSummary?.core ?? job.result.rules.length}项制造与检验要求，请核对分类与原文疑点`;
         } catch (error) { job.status = 'failed'; job.error = safeError(error); job.message = '规范解析失败，可重新提交'; }
         await persist('specifications', job);
       });
@@ -203,7 +208,7 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
       }
       const specificationView = await readInformationView(root, spec.result);
       const counts = informationSummary(specificationView.rules);
-      const job = { id, specificationId: spec.id, specification: { id: spec.id, metadata: spec.result.metadata, ruleCount: counts.actionable, recordCount: counts.total }, model: MODEL_ID, stage, status: 'queued', message: `${drawings.length}个零件等待处理`, drawings, createdAt: new Date().toISOString() };
+      const job = { id, specificationId: spec.id, specification: { id: spec.id, metadata: spec.result.metadata, ruleCount: usesDrawingScope(spec.result) ? inheritableRules(spec.result).length : counts.actionable, recordCount: counts.total, ...(usesDrawingScope(spec.result) ? { scopePolicy: spec.result.scopePolicy, ...ruleUsageSummary(spec.result.rules) } : {}) }, model: MODEL_ID, stage, status: 'queued', message: `${drawings.length}个零件等待处理`, drawings, createdAt: new Date().toISOString() };
       await persist('drawing-batches', job); res.status(202).json({ id });
       for (const drawing of drawings) enqueueDrawing(job, drawing, spec);
     } catch (error) { await cleanup(files); next(error); }

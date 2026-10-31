@@ -1,17 +1,19 @@
 import { z } from 'zod';
 import { normalizeEvidence } from './validation.js';
-import { INFORMATION_TYPES, ACTIONABLE_TYPES, informationSummary } from './information-types.js';
+import { INFORMATION_TYPES, ACTIONABLE_TYPES, informationSummary, PROCESS_CATEGORIES, SCOPE_POLICY, usesDrawingScope, inheritableRules } from './information-types.js';
 
 export const sourceSchema = z.object({ file: z.string().min(1), page: z.number().int().positive(), section: z.string().default(''), quote: z.string().min(1) });
 const parameters = z.array(z.object({ name: z.string(), value: z.union([z.string(), z.number()]).transform(String), unit: z.string() }));
 export const requirementSchema = z.object({
   id: z.string().min(1), informationType: z.enum(INFORMATION_TYPES), category: z.string().min(1), requirement: z.string().min(1), scope: z.string(),
   parameters, sources: z.array(sourceSchema).min(1), review_required: z.boolean(), review_note: z.string(),
+  processCategory: z.enum(PROCESS_CATEGORIES).optional(),
 });
 export const ruleSchema = requirementSchema.extend({
   strength: z.enum(['required', 'prohibited', 'recommended', 'permitted', 'reference', 'conditional']),
   conditions: z.array(z.string()), exceptions: z.array(z.string()),
   overridePolicy: z.string(), externalReferences: z.array(z.string()),
+  usage: z.enum(['inspection', 'comparison']).optional(),
 });
 export const metadataSchema = z.object({ number: z.string().default(''), title: z.string().default(''), version: z.string().default(''), scope: z.string().default(''), excludedProcesses: z.array(z.string()).default([]), priorityPolicy: z.string().default('') });
 export const specificationSchema = z.object({ metadata: metadataSchema, rules: z.array(ruleSchema).max(2000), warnings: z.array(z.string()).default([]) });
@@ -23,7 +25,9 @@ export const matchingSchema = z.object({
     airtightness: z.enum(['required', 'not_required', 'unspecified']), dimensionState: z.enum(['before_finish', 'after_finish', 'unspecified']),
     references: z.array(z.string()).default([]), facts: z.array(z.object({ name: z.string(), value: z.string(), sources: z.array(sourceSchema).min(1) })).default([]), uncertainties: z.array(z.string()).default([]),
   }), summary: z.string().default(''),
-  requirements: z.array(requirementSchema.extend({ informationType: z.enum(ACTIONABLE_TYPES), origin: z.enum(['drawing', 'specification', 'combined']), ruleIds: z.array(z.string()) })).min(1).max(2000),
+  requirements: z.array(requirementSchema.extend({ informationType: z.enum(ACTIONABLE_TYPES), origin: z.enum(['drawing', 'specification', 'combined']), ruleIds: z.array(z.string()),
+    conflict: z.object({ kind: z.enum(['conflict', 'drawing_override']), specificationRequirement: z.string().min(1), reason: z.string().min(1) }).nullish(),
+  })).min(1).max(2000),
   dispositions: z.array(z.object({ ruleId: z.string(), status: z.enum(['applicable', 'not_applicable', 'overridden', 'needs_confirmation']), reason: z.string().min(1), evidence: z.array(sourceSchema).min(1) })),
   warnings: z.array(z.string()).default([]),
 });
@@ -33,11 +37,85 @@ export const drawingPatchSchema = z.object({
   removals: z.array(z.object({ id: z.string(), reason: z.string().min(1), evidence: z.array(sourceSchema).min(1) })),
   dispositionReplacements: z.array(matchingSchema.shape.dispositions.element), warnings: z.array(z.string()),
 });
+const readSource = sourceSchema.extend({ section: z.string() }).strict();
+const drawingReadSchema = matchingSchema.extend({
+  drawing: matchingSchema.shape.drawing.extend({
+    facts: z.array(z.object({ name: z.string(), value: z.string(), sources: z.array(readSource).min(1) }).strict()),
+  }).strict(),
+  summary: z.string(), warnings: z.array(z.string()),
+  requirements: z.array(matchingSchema.shape.requirements.element.extend({
+    origin: z.literal('drawing'), ruleIds: z.array(z.string()).length(0), conflict: z.null(),
+    parameters: z.array(parameters.element.strict()), sources: z.array(readSource).min(1),
+  }).strict()).min(1).max(2000),
+  dispositions: z.array(z.never()).length(0),
+}).strict();
+// The matching call may attach specification evidence, but cannot return a new
+// drawing profile or rewrite any requirement read from the drawing.
+export const normMatchDeltaSchema = z.object({
+  additions: z.array(matchingSchema.shape.requirements.element.extend({
+    origin: z.literal('specification'), ruleIds: z.array(z.string()).min(1), conflict: z.null(),
+    sources: z.array(readSource).min(1), parameters: z.array(parameters.element.strict()),
+  }).strict()),
+  bindings: z.array(z.object({
+    id: z.string().min(1), ruleIds: z.array(z.string()).min(1), sources: z.array(readSource).min(1),
+    conflict: matchingSchema.shape.requirements.element.shape.conflict.unwrap().nullable(),
+    review_required: z.boolean(), review_note: z.string(),
+  }).strict()),
+  dispositions: z.array(matchingSchema.shape.dispositions.element.extend({ evidence: z.array(readSource).min(1) }).strict()), warnings: z.array(z.string()),
+}).strict();
+export const RAW_MATERIAL_FACT_NAMES = ['原材料形态', '原材料公称厚度', '原材料公称直径'];
+
+export function validateDrawingRead(raw, drawingPrepared) {
+  for (const key of ['drawing', 'summary', 'requirements', 'dispositions', 'warnings']) if (!Object.hasOwn(raw || {}, key)) throw new Error('图纸独立识读缺少字段：' + key);
+  for (const key of Object.keys(matchingSchema.shape.drawing.shape)) if (!Object.hasOwn(raw.drawing || {}, key)) throw new Error('图纸独立识读缺少drawing字段：' + key);
+  const result = parseContract(drawingReadSchema, raw, '图纸独立识读');
+  if (result.dispositions.length || result.requirements.some(row => row.origin !== 'drawing' || row.ruleIds.length || row.conflict !== null)) throw new Error('图纸独立识读只能返回本图要求，不能包含规范处置、关联或冲突');
+  const rawFacts = result.drawing.facts.filter(fact => RAW_MATERIAL_FACT_NAMES.includes(fact.name));
+  if (new Set(rawFacts.map(fact => fact.name)).size !== rawFacts.length || rawFacts.some(fact => !fact.value.trim())) throw new Error('原材料事实名称重复或值为空');
+  const form = rawFacts.find(fact => fact.name === '原材料形态');
+  if (result.drawing.materialForm && (!form || form.value !== result.drawing.materialForm)) throw new Error('原材料形态必须由本图明确的原材料形态事实支持，不能从成品形状或尺寸推定');
+  if (form && result.drawing.materialForm !== form.value) throw new Error('原材料形态事实与drawing.materialForm不一致');
+  return validateMatching(result, { scopePolicy: SCOPE_POLICY, rules: [] }, drawingPrepared, { documents: [] });
+}
+
+export function applyNormMatchDelta(read, rawDelta, specification, drawingPrepared, specPrepared) {
+  // Reparse the trusted, previously checked read to remove derived verification
+  // metadata before running the strict model-output contract again.
+  const drawing = validateDrawingRead(parseContract(matchingSchema, read, '图纸识读记录'), drawingPrepared);
+  const delta = parseContract(normMatchDeltaSchema, rawDelta, '规范匹配差量');
+  const existing = uniqueIds(drawing.requirements, '图纸要求');
+  uniqueIds(delta.additions, '规范新增要求'); uniqueIds(delta.bindings, '图纸关联');
+  const specNames = new Set(specPrepared.documents.map(document => document.name));
+  for (const item of [...delta.additions, ...delta.bindings]) {
+    if (item.sources.some(source => !specNames.has(source.file))) throw new Error('规范匹配差量只能提供规范来源，不能编造或重写图纸证据');
+    if (new Set(item.ruleIds).size !== item.ruleIds.length) throw new Error('规范匹配差量重复关联规则：' + item.id);
+  }
+  for (const row of delta.additions) if (existing.has(row.id)) throw new Error('规范新增要求与图纸要求编号冲突：' + row.id);
+  for (const binding of delta.bindings) if (!existing.has(binding.id)) throw new Error('规范关联引用不存在的图纸要求：' + binding.id);
+  const bindings = new Map(delta.bindings.map(binding => [binding.id, binding]));
+  const requirements = drawing.requirements.map(row => {
+    const binding = bindings.get(row.id);
+    return !binding ? row : { ...row, origin: 'combined', ruleIds: binding.ruleIds, sources: [...row.sources, ...binding.sources],
+      conflict: binding.conflict, review_required: row.review_required || binding.review_required,
+      review_note: appendReviewNotes(row.review_note, [binding.review_note].filter(Boolean)) };
+  });
+  return validateMatching({ ...drawing, requirements: [...requirements, ...delta.additions], dispositions: delta.dispositions,
+    warnings: [...new Set([...drawing.warnings, ...delta.warnings])] }, specification, drawingPrepared, specPrepared);
+}
 
 export function parseContract(schema, raw, label) {
   const parsed = schema.safeParse(raw);
   if (!parsed.success) throw new Error(`${label}结构不符合要求：` + parsed.error.issues.slice(0, 4).map(i => `${i.path.join('.')}: ${i.message}`).join('; '));
   return parsed.data;
+}
+// Base schemas still read historical records. New model output is checked here
+// and by validateMatching, never repaired by filling a missing classification.
+export function validateRuleUsage(rules) {
+  for (const rule of rules) {
+    if (!['inspection', 'comparison'].includes(rule.usage)) throw new Error(`规范规则缺少检验/对照用途：${rule.id}`);
+    if (rule.informationType === 'context' && rule.usage === 'inspection') throw new Error(`背景记录不能作为检验要求：${rule.id}`);
+  }
+  return rules;
 }
 export function verifySources(sources, documents) {
   return sources.map(source => {
@@ -81,6 +159,9 @@ export function applyDrawingPatch(candidate, rawPatch, specification, drawingPre
   uniqueIds(patch.additions, '新增要求');
   for (const id of [...replacing, ...removing]) if (!existing.has(id)) throw new Error(`补丁引用不存在的要求：${id}`);
   for (const id of removing) if (replacing.has(id)) throw new Error(`要求不能同时替换和移除：${id}`);
+  const specificationOnlyIds = new Set(candidate.requirements.filter(item => item.origin === 'specification').map(item => item.id));
+  const misplacedConflicts = patch.replacements.filter(item => specificationOnlyIds.has(item.id) && item.conflict).map(item => item.id);
+  if (misplacedConflicts.length) throw new Error(`原规范独立要求不能作为冲突/覆盖主行：${misplacedConflicts.join('、')}；请在已有图纸要求或真实新增图纸要求上记录双方差异`);
   const documents = [...drawingPrepared.documents, ...specPrepared.documents];
   for (const removal of patch.removals) verifySources(removal.evidence, documents);
   const replacements = new Map(patch.replacements.map(item => [item.id, item]));
@@ -108,6 +189,8 @@ export function applyDrawingPatch(candidate, rawPatch, specification, drawingPre
 
 export function validateMatching(raw, specification, drawingPrepared, specPrepared) {
   const result = parseContract(matchingSchema, raw, '逐图结果');
+  const drawingScope = usesDrawingScope(specification);
+  if (drawingScope) validateRuleUsage(specification.rules);
   const documents = [...specPrepared.documents, ...drawingPrepared.documents];
   if (new Set(documents.map(d => d.name)).size !== documents.length) throw new Error('规范和图纸文件名重复，无法唯一定位证据');
   uniqueIds(result.requirements, '要求');
@@ -116,6 +199,29 @@ export function validateMatching(raw, specification, drawingPrepared, specPrepar
   const linked = new Set();
   const drawingNames = new Set(drawingPrepared.documents.map(d => d.name));
   const specNames = new Set(specPrepared.documents.map(d => d.name));
+  // Report these independent evidence omissions together so one contract
+  // correction can address all of them. Do not synthesize or alter evidence.
+  // Invalid files/pages and missing specification provenance keep their
+  // existing, more specific diagnostics before checking page relationships.
+  for (const disposition of result.dispositions) verifySources(disposition.evidence, documents);
+  for (const item of result.requirements) {
+    verifySources(item.sources, documents);
+    if (item.origin !== 'drawing' && !item.sources.some(s => specNames.has(s.file))) throw new Error(`规范要求缺少规范原文证据：${item.id}`);
+  }
+  const evidenceProblems = [];
+  for (const disposition of result.dispositions) {
+    if (rules.has(disposition.ruleId) && disposition.status === 'overridden' &&
+        (!disposition.evidence.some(s => drawingNames.has(s.file)) || !disposition.evidence.some(s => specNames.has(s.file)))) {
+      evidenceProblems.push(`覆盖处置缺少规范和本图双方证据：${disposition.ruleId}`);
+    }
+  }
+  for (const item of result.requirements) for (const id of item.ruleIds) {
+    const rule = rules.get(id);
+    if (rule && !item.sources.some(s => rule.sources.some(r => s.file === r.file && s.page === r.page))) {
+      evidenceProblems.push(`要求缺少关联规则所在页的证据：${item.id}/${id}`);
+    }
+  }
+  if (evidenceProblems.length) throw new Error('逐图证据校验未通过：' + evidenceProblems.join('；'));
   for (const disposition of result.dispositions) {
     if (!rules.has(disposition.ruleId)) throw new Error(`未知规则：${disposition.ruleId}`);
     if (dispositions.has(disposition.ruleId)) throw new Error(`规则被重复判定：${disposition.ruleId}`);
@@ -123,41 +229,51 @@ export function validateMatching(raw, specification, drawingPrepared, specPrepar
     if (disposition.status === 'overridden' && (!disposition.evidence.some(s => drawingNames.has(s.file)) || !disposition.evidence.some(s => specNames.has(s.file)))) throw new Error(`覆盖处置缺少规范和本图双方证据：${disposition.ruleId}`);
     dispositions.set(disposition.ruleId, disposition);
   }
-  const actionable = specification.rules.filter(r => r.informationType !== 'context');
+  const actionable = inheritableRules(specification);
   const missing = actionable.filter(r => !dispositions.has(r.id));
   if (missing.length) throw new Error(`规则没有适用性结论：${missing.slice(0, 8).map(r => r.id).join('、')}（共${missing.length}条）`);
   result.requirements = result.requirements.map(item => {
+    if (drawingScope && !PROCESS_CATEGORIES.includes(item.processCategory)) throw new Error(`最终要求缺少八类工艺分类：${item.id}`);
     let checked = verifyRequirement(item, documents);
     for (const id of item.ruleIds) {
       if (!rules.has(id)) throw new Error(`要求引用未知规则：${id}`);
       if (rules.get(id).informationType === 'context') throw new Error(`背景定义或导航不能进入有效要求：${item.id}/${id}`);
-      if (dispositions.get(id).status === 'not_applicable') throw new Error(`不适用规则进入了本零件有效清单：${id}`);
+      if (dispositions.get(id)?.status === 'not_applicable') throw new Error(`不适用规则进入了本零件有效清单：${id}`);
       linked.add(id);
     }
     if (item.origin !== 'drawing' && !item.ruleIds.length) throw new Error(`规范要求缺少规则关联：${item.id}`);
+    if (drawingScope && item.origin === 'specification' && item.ruleIds.some(id => rules.get(id).usage !== 'inspection')) throw new Error(`非检验规范条款不能独立进入最终工艺清单：${item.id}`);
     if (item.origin === 'drawing' && item.ruleIds.length) throw new Error(`图纸独有要求不应关联规范规则：${item.id}`);
     if (item.origin !== 'specification' && !item.sources.some(s => drawingNames.has(s.file))) throw new Error(`图纸要求缺少本零件证据：${item.id}`);
     if (item.origin !== 'drawing' && !item.sources.some(s => specNames.has(s.file))) throw new Error(`规范要求缺少规范原文证据：${item.id}`);
     for (const id of item.ruleIds) {
       if (!item.sources.some(s => rules.get(id).sources.some(r => s.file === r.file && s.page === r.page))) throw new Error(`要求缺少关联规则所在页的证据：${item.id}/${id}`);
     }
+    if (item.conflict) {
+      if (item.origin !== 'combined' || !item.ruleIds.length || !item.sources.some(s => drawingNames.has(s.file)) || !item.sources.some(s => specNames.has(s.file))) throw new Error(`冲突/覆盖要求缺少规范与图纸双方来源或规则关联：${item.id}`);
+      if (item.conflict.kind === 'conflict') checked = { ...checked, review_required: true, review_note: appendReviewNotes(checked.review_note, [item.conflict.reason]) };
+    }
+    if (drawingScope && item.ruleIds.some(id => dispositions.get(id)?.status === 'overridden') && !item.conflict) throw new Error(`图纸覆盖要求缺少突出显示的冲突/覆盖说明：${item.id}`);
     const uncertain = item.ruleIds.some(id => {
       const disposition = dispositions.get(id);
-      return disposition.status === 'needs_confirmation' || rules.get(id).review_required || disposition.evidence.some(source =>
+      const authorizedOverride = drawingScope && item.conflict?.kind === 'drawing_override' && disposition?.status === 'overridden';
+      return disposition?.status === 'needs_confirmation' || !authorizedOverride && rules.get(id).review_required || (disposition?.evidence || []).some(source =>
         source.verification === 'unmatched_quote' || documents.find(doc => doc.name === source.file)?.needsVisualReview?.includes(source.page));
     });
     if (uncertain) checked = { ...checked, review_required: true, review_note: appendReviewNotes(checked.review_note, ['关联规则或适用条件尚待确认。']) };
     return checked;
   });
-  const unlinked = result.dispositions.filter(d => rules.get(d.ruleId).informationType !== 'context' && d.status !== 'not_applicable' && !linked.has(d.ruleId));
+  const operativeIds = new Set(actionable.map(rule => rule.id));
+  const unlinked = result.dispositions.filter(d => operativeIds.has(d.ruleId) && d.status !== 'not_applicable' && !linked.has(d.ruleId));
   if (unlinked.length) throw new Error(`已判适用/覆盖/待确认的规则缺少要求条目：${unlinked.slice(0, 8).map(d => d.ruleId).join('、')}`);
   result.drawing.facts = result.drawing.facts.map(f => {
     if (f.sources.some(s => !drawingNames.has(s.file))) throw new Error(`零件身份事实不能从通用规范取值：${f.name}`);
     return { ...f, sources: verifySources(f.sources, documents) };
   });
-  const operativeDispositions = result.dispositions.filter(d => rules.get(d.ruleId).informationType !== 'context');
+  const operativeDispositions = result.dispositions.filter(d => operativeIds.has(d.ruleId));
   const counts = status => operativeDispositions.filter(d => d.status === status).length;
-  result.ruleCoverage = { total: actionable.length, decided: operativeDispositions.length, backgroundRecords: rules.size - actionable.length, applicable: counts('applicable'), notApplicable: counts('not_applicable'), overridden: counts('overridden'), needsConfirmation: counts('needs_confirmation'), note: '仅对非背景要求统计处置；背景定义和引用关系用于判断，不计入有效要求。处置完整不代表语义正确。' };
+  result.ruleCoverage = { total: actionable.length, decided: operativeDispositions.length, backgroundRecords: specification.rules.filter(r => r.informationType === 'context').length, ...(drawingScope ? { comparisonRecords: specification.rules.filter(r => r.usage === 'comparison').length } : {}), applicable: counts('applicable'), notApplicable: counts('not_applicable'), overridden: counts('overridden'), needsConfirmation: counts('needs_confirmation'), note: drawingScope ? '仅对规范检验要求统计必需处置；非检验条款供冲突对照，不自动进入最终清单。处置完整不代表语义正确。' : '仅对非背景要求统计处置；背景定义和引用关系用于判断，不计入有效要求。处置完整不代表语义正确。' };
+  if (drawingScope) result.scopePolicy = SCOPE_POLICY;
   result.informationSummary = informationSummary(result.requirements);
   result.documents = documents.map(({ name, pages }) => ({ name, pages, role: drawingNames.has(name) ? 'drawing' : 'specification' }));
   return result;

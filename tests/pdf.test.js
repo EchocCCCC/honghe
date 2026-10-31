@@ -104,17 +104,55 @@ test('drawing detail mode supplies genuinely higher-resolution crops for portrai
   const file = await fixture('portrait-drawing.pdf', [{ text: 'Detailed drawing notes', visual: true }]);
   const result = await prepareDocuments([file], path.join(temporaryRoot, 'detail'), { detailMode: true });
   assert.equal(result.pages[0].landscape, false);
-  assert.equal(result.images.length, 6);
+  assert.equal(result.images.length, 11);
   const overview = await fs.readFile(result.images[0]);
   const crop = await fs.readFile(result.images[1]);
-  assert.ok(crop.readUInt32BE(16) > overview.readUInt32BE(16) / 2 * 1.8);
+  assert.ok(crop.readUInt32BE(20) > overview.readUInt32BE(20) / 3 * 1.8);
+  const focus = await fs.readFile(result.images.at(-1));
+  assert.ok(Math.max(focus.readUInt32BE(16), focus.readUInt32BE(20)) <= 2000, 'portrait identity-chain focus stays inside Pi image limits');
   assert.equal(result.documents[0].needsVisualReview.length, 0);
 });
-test('drawing margin evidence is rerendered from the correct rotated physical page and two pages still fit twelve images', options, async () => {
+
+test('a single physical drawing page uses nine overlapping original-pixel tiles within eleven images', options, async () => {
+  const file = await fixture('one-physical-page.pdf', [{
+    width: 600, height: 360, visual: true,
+    extraStream: '0 0 1 rg 300 180 300 180 re f\n1 0 0 rg 500 20 70 50 re f\n',
+  }]);
+  const originalPdf = await fs.readFile(file.path);
+  const result = await prepareDrawingDocuments([file], path.join(temporaryRoot, 'drawing-nine-tiles'));
+  assert.equal(result.coverage.physicalPages, 1);
+  assert.equal(result.images.length, 11);
+  assert.equal(result.pages[0].imagePaths.length, 11);
+  const tileWidth = Math.ceil(5200 / 3), tileHeight = Math.ceil(3120 / 3);
+  for (let tile = 0; tile < 9; tile++) {
+    const actualPath = result.pages[0].imagePaths[tile + 1];
+    assert.equal(path.basename(actualPath), `doc-1-page-1-tile-${tile + 1}.png`);
+    const x = Math.max(0, tile % 3 * tileWidth - 100), y = Math.max(0, Math.floor(tile / 3) * tileHeight - 100);
+    const width = Math.min(tileWidth + 200, 5200 - x), height = Math.min(tileHeight + 200, 3120 - y);
+    const referencePath = path.join(temporaryRoot, `nine-tiles-reference-${tile + 1}`);
+    await runProcess(poppler.render, ['-f', '1', '-l', '1', '-singlefile', '-scale-to', '5200',
+      '-x', String(x), '-y', String(y), '-W', String(width), '-H', String(height), '-png', file.path, referencePath]);
+    const actual = await fs.readFile(actualPath);
+    assert.deepEqual(actual, await fs.readFile(referencePath + '.png'), 'each tile is a direct Poppler crop without added labels or answers');
+    assert.equal(actual.readUInt32BE(16), width);
+    assert.equal(actual.readUInt32BE(20), height);
+    assert.ok(width >= 1800 && width <= 1950, 'landscape drawing tiles stay near 1900 pixels wide');
+    assert.ok(width * height < 2_500_000, 'smaller tiles avoid sending a full quadrant as a large image');
+  }
+  const coverage = JSON.parse(await fs.readFile(result.coverage.manifestPath, 'utf8'));
+  assert.equal(coverage.totalImages, 11);
+  assert.deepEqual(coverage.pages[0].images, result.images.map(image => path.basename(image)));
+  const source = await fs.readFile(result.sourcePath, 'utf8');
+  assert.match(source, /位置第3行第3列/);
+  assert.deepEqual(result.coverage.missingImagePages, []);
+  assert.deepEqual(await fs.readFile(file.path), originalPdf);
+});
+test('drawing identity-chain focus contains continuous original value and label rows and two rotated pages still fit twelve images', options, async () => {
   const file = await fixture('two-drawing-margins.pdf', [
-    { width: 600, height: 360, extraStream: '1 0 0 rg 12 12 120 150 re f\n' },
+    { width: 600, height: 360, extraStream: '1 0 0 rg 12 12 120 150 re f\n0 0 0 rg\nBT /F1 6 Tf 2 95 Td (VALUE_A) Tj 0 -20 Td (LABEL_A) Tj 0 -20 Td (VALUE_B) Tj 0 -20 Td (LABEL_B) Tj ET\n' },
     { width: 360, height: 600, rotate: 90, extraStream: '0 0 1 rg 0 0 360 600 re f\n' },
   ]);
+  const originalPdf = await fs.readFile(file.path);
   const result = await prepareDrawingDocuments([file], path.join(temporaryRoot, 'drawing-margins'));
   assert.equal(result.images.length, 12);
   assert.deepEqual(result.pages.map(page => [page.page, page.landscape, page.imagePaths.length]), [[1, true, 6], [2, true, 6]]);
@@ -122,13 +160,13 @@ test('drawing margin evidence is rerendered from the correct rotated physical pa
   for (const page of result.pages) {
     const focus = page.imagePaths.at(-1), expected = path.join(temporaryRoot, `margin-page-${page.page}-reference`);
     assert.equal(path.basename(focus), `doc-1-page-${page.page}-focus-left-lower.png`);
-    // This fixture renders at 5200 x 3120 after rotation. Compare the narrow
-    // lower-left region with a direct Poppler render from that physical page.
-    await runProcess(poppler.render, ['-f', String(page.page), '-l', String(page.page), '-singlefile', '-scale-to', '5200', '-x', '0', '-y', '1460', '-W', '1400', '-H', '1660', '-png', file.path, expected]);
+    // At 7800 x 4680 after rotation, x=[0,.09W], y=[.70H,H].
+    // Byte equality to direct Poppler output rules out added labels or answers.
+    await runProcess(poppler.render, ['-f', String(page.page), '-l', String(page.page), '-singlefile', '-scale-to', '7800', '-x', '0', '-y', '3276', '-W', '702', '-H', '1404', '-png', file.path, expected]);
     const actual = await fs.readFile(focus), reference = await fs.readFile(expected + '.png');
     assert.deepEqual(actual, reference);
-    assert.equal(actual.readUInt32BE(16), 1400);
-    assert.equal(actual.readUInt32BE(20), 1660);
+    assert.equal(actual.readUInt32BE(16), 702);
+    assert.equal(actual.readUInt32BE(20), 1404);
     focusImages.push(actual);
   }
   assert.notDeepEqual(focusImages[0], focusImages[1], 'different physical pages must not share the first page crop');
@@ -138,6 +176,7 @@ test('drawing margin evidence is rerendered from the correct rotated physical pa
   const source = await fs.readFile(result.sourcePath, 'utf8');
   for (const page of result.pages) assert.ok(source.includes(`doc-1-page-${page.page}-focus-left-lower.png`));
   assert.deepEqual(result.documents[0].needsVisualReview, []);
+  assert.deepEqual(await fs.readFile(file.path), originalPdf, 'rendering never changes the source PDF');
 });
 
 test('a failed margin render keeps all original drawing images and explicitly requires review', options, async () => {
@@ -159,12 +198,12 @@ test('a failed margin render keeps all original drawing images and explicitly re
   ].join('\n');
   const { stdout } = await runProcess(python(), ['-X', 'utf8', '-c', code, scriptDirectory, file.path, file.name, directory, JSON.stringify(poppler)]);
   const result = JSON.parse(stdout);
-  assert.equal(result.images.length, 5);
-  assert.equal(result.pages[0].imagePaths.length, 5);
+  assert.equal(result.images.length, 10);
+  assert.equal(result.pages[0].imagePaths.length, 10);
   assert.deepEqual(result.documents[0].imagePages, [1]);
   assert.deepEqual(result.documents[0].needsVisualReview, [1]);
   assert.equal(result.coverage.renderedPages, 1);
-  assert.equal(result.coverage.totalImages, 5);
+  assert.equal(result.coverage.totalImages, 10);
   assert.deepEqual(result.coverage.missingImagePages, []);
   assert.ok(result.warnings.some(warning => /左下边栏.*失败/.test(warning)));
   const coverage = JSON.parse(await fs.readFile(result.coverage.manifestPath, 'utf8'));
@@ -234,6 +273,6 @@ test('the service invokes both Python Skill modes and preserves their output con
   const drawing = await prepareDrawingDocuments([file], path.join(temporaryRoot, 'service-drawing'));
   assert.equal(drawing.preparation.mode, 'drawing');
   assert.equal(drawing.coverage.physicalPages, 1);
-  assert.equal(drawing.images.length, 6);
+  assert.equal(drawing.images.length, 11);
   assert.deepEqual(drawing.documents[0].textPages, specification.documents[0].textPages);
 });

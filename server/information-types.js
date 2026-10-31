@@ -5,6 +5,13 @@ import { createHash } from 'node:crypto';
 export const INFORMATION_TYPES = Object.freeze(['manufacturing', 'quality', 'procurement', 'context']);
 export const ACTIONABLE_TYPES = Object.freeze(INFORMATION_TYPES.filter(type => type !== 'context'));
 export const INFORMATION_VERSION = 'requirements-scope-v1';
+export const SCOPE_POLICY = 'drawing-plus-inspection-v1';
+export const PROCESS_CATEGORIES = Object.freeze(['铸造', '机加', '热处理', '表面处理', '刻字', '检验', '焊接', '其他']);
+export const usesDrawingScope = result => result?.scopePolicy === SCOPE_POLICY;
+export const inheritableRules = specification => (specification?.rules || []).filter(rule => rule.informationType !== 'context' && (!usesDrawingScope(specification) || rule.usage === 'inspection'));
+export function ruleUsageSummary(rules) {
+  return { inspectionCount: rules.filter(rule => rule.usage === 'inspection').length, comparisonCount: rules.filter(rule => rule.usage === 'comparison').length };
+}
 export const informationDigest = result => createHash('sha256').update(JSON.stringify(result)).digest('hex');
 const validType = type => INFORMATION_TYPES.includes(type);
 const rowsOf = result => Array.isArray(result?.rules) ? result.rules : result?.requirements || [];
@@ -78,13 +85,15 @@ export function decorateDispositions(result, specification) {
   if (!result) return result;
   const types = new Map((specification?.rules || []).map(rule => [rule.id, rule.informationType]));
   const dispositions = (result.dispositions || []).map(item => ({ ...item, informationType: types.get(item.ruleId) || 'unclassified' }));
-  const relevant = dispositions.filter(item => item.informationType !== 'context');
+  const operativeIds = specification ? new Set(inheritableRules(specification).map(rule => rule.id)) : null;
+  const relevant = dispositions.filter(item => operativeIds ? operativeIds.has(item.ruleId) : item.informationType !== 'context');
   const count = status => relevant.filter(item => item.status === status).length;
-  const actionableRules = (specification?.rules || []).filter(rule => rule.informationType !== 'context');
+  const actionableRules = inheritableRules(specification);
   return { ...result, dispositions, ruleCoverage: {
     ...result.ruleCoverage, originalTotal: result.ruleCoverage?.total, total: specification ? actionableRules.length : relevant.length, decided: relevant.length,
     applicable: count('applicable'), notApplicable: count('not_applicable'), overridden: count('overridden'), needsConfirmation: count('needs_confirmation'),
     backgroundRecords: (specification?.rules || []).filter(rule => rule.informationType === 'context').length,
-    note: '仅对非背景规范要求统计处置；背景定义和引用关系供判断使用，不计入可执行要求。处置完整不代表语义正确。',
+    ...(usesDrawingScope(specification) ? { comparisonRecords: (specification.rules || []).filter(rule => rule.usage === 'comparison').length } : {}),
+    note: usesDrawingScope(specification) ? '仅对规范检验要求统计必需处置；非检验条款只供冲突对照，不自动进入最终清单。处置完整不代表语义正确。' : '仅对非背景规范要求统计处置；背景定义和引用关系供判断使用，不计入可执行要求。处置完整不代表语义正确。',
   } };
 }

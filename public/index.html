@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#142630">
-  <meta name="description" content="建立可追溯的技术规范库，逐张图纸生成制造、检验和待确认要求。">
+  <meta name="description" content="建立可追溯的技术规范库，以图纸为准，补充规范检验，按八类查看零件工艺要求。">
   <title>鸿禾 · 工艺要求工作台</title><link rel="stylesheet" href="/styles.css"><script src="/app.js" defer></script>
 </head>
 <body>
@@ -17,11 +17,11 @@
     <div class="main-shell">
       <header class="topbar"><div>工作空间 <span>/</span> <strong>工艺要求提取</strong></div><span class="workspace-badge">本地工作空间</span></header>
       <main id="main">
-        <div class="page-heading"><div class="eyebrow">MANUFACTURING INTELLIGENCE</div><h1>一套规范，多张图纸，各自有据<span>。</span></h1><p>先整理规范，再结合图纸查看制造约束与质量检验；采购交付、背景说明分开保留。</p><div class="flow-line"><span>01 解析规范</span><i>→</i><span>02 匹配图纸</span><i>→</i><span>03 逐件核对</span><b>DeepSeek 4.1 Flash</b></div></div>
+        <div class="page-heading"><div class="eyebrow">MANUFACTURING INTELLIGENCE</div><h1>一套规范，多张图纸，各自有据<span>。</span></h1><p>以图纸要求为准，补充适用的规范检验，按八类查看工艺要求并突出冲突。</p><div class="flow-line"><span>01 解析规范</span><i>→</i><span>02 匹配图纸</span><i>→</i><span>03 逐件核对</span><b>DeepSeek 4.1 Flash</b></div></div>
         <div class="alert" id="global-alert" role="alert" hidden><span id="alert-text"></span><button class="icon-button" id="dismiss-alert" type="button" aria-label="关闭提示">×</button></div>
         <section class="card" id="specifications" aria-labelledby="spec-heading">
           <div class="section-head"><div><span class="step-number">01</span><h2 id="spec-heading">技术规范库</h2><span class="section-caption">导入技术规范，供图纸提取时选用</span></div><button class="text-button" id="refresh-specs" type="button">刷新规范库</button></div>
-          <div class="spec-layout"><div class="spec-library"><form id="spec-form"><label class="field-label" for="spec-file">导入一份技术规范</label><input id="spec-file" type="file" accept="application/pdf,.pdf" required><label class="field-label small-gap" for="spec-label">便于识别的名称 <span>（选填）</span></label><input id="spec-label" type="text" maxlength="120" placeholder="例如：铸铝件采购技术条件"><button class="primary-button" id="build-spec" type="submit" disabled>导入并解析规范 <span>→</span></button><p class="hint" id="spec-start-hint">这里只导入技术规范 PDF；对应图纸在下一步导入</p></form><div class="library-heading"><strong>已有规范</strong><span id="spec-count">0 个</span></div><div class="spec-list" id="spec-list"><p class="placeholder">正在读取规范库…</p></div></div><div class="spec-detail" id="spec-detail"><div class="section-empty"><span class="empty-symbol">▤</span><h3>先建立一份可复用的规范</h3><p>每份规范单独保存。完整保存规范内容，并区分制造、质量、采购和背景；完成后可逐图匹配。</p></div></div></div>
+          <div class="spec-layout"><div class="spec-library"><form id="spec-form"><label class="field-label" for="spec-file">导入一份技术规范</label><input id="spec-file" type="file" accept="application/pdf,.pdf" required><label class="field-label small-gap" for="spec-label">便于识别的名称 <span>（选填）</span></label><input id="spec-label" type="text" maxlength="120" placeholder="例如：铸铝件采购技术条件"><button class="primary-button" id="build-spec" type="submit" disabled>导入并解析规范 <span>→</span></button><p class="hint" id="spec-start-hint">这里只导入技术规范 PDF；对应图纸在下一步导入</p></form><div class="library-heading"><strong>已有规范</strong><span id="spec-count">0 个</span></div><div class="spec-list" id="spec-list"><p class="placeholder">正在读取规范库…</p></div></div><div class="spec-detail" id="spec-detail"><div class="section-empty"><span class="empty-symbol">▤</span><h3>先建立一份可复用的规范</h3><p>每份规范单独保存检验候选与对照依据，供关联图纸逐件提取。</p></div></div></div>
         </section>
         <section class="card drawing-card" id="drawing-workspace" aria-labelledby="drawing-heading">
           <div class="section-head"><div><span class="step-number">02</span><h2 id="drawing-heading">关联图纸，逐件提取</h2><span class="section-caption">同一批图纸使用同一规范版本</span></div><span class="tag">PDF · 最多20份</span></div>
@@ -33,11 +33,11 @@
           </form>
         </section>
         <section class="results-section" aria-labelledby="results-heading"><div class="results-heading"><div><span class="step-number">03</span><h2 id="results-heading">零件工艺要求</h2><span class="section-caption">名称与量化指标，逐项保留依据</span></div><div class="export-actions" id="export-actions" hidden><button class="secondary-button" id="export-csv" type="button">导出当前筛选 CSV</button><button class="secondary-button" id="export-json" type="button">导出完整资料 JSON</button></div></div>
-          <div class="empty-state" id="empty-state"><span class="empty-symbol">✓</span><h3>制造与检验要求，逐件呈现</h3><p>完成规范解析，导入配套图纸后，结果将在这里显示。</p><div class="empty-features">制造约束 <b>·</b> 质量检验 <b>·</b> 核心待确认</div></div><div id="batch-content" hidden><div class="batch-status" id="batch-status" role="status" aria-live="polite"></div><div class="drawing-result-layout"><nav class="drawing-list" id="drawing-list" aria-label="选择零件图纸"></nav><div class="drawing-result" id="drawing-result"></div></div></div>
+          <div class="empty-state" id="empty-state"><span class="empty-symbol">✓</span><h3>工艺要求，逐件呈现</h3><p>完成规范解析，导入配套图纸后，结果将在这里显示。</p><div class="empty-features">图纸要求 <b>·</b> 规范检验 <b>·</b> 八类分类</div></div><div id="batch-content" hidden><div class="batch-status" id="batch-status" role="status" aria-live="polite"></div><div class="drawing-result-layout"><nav class="drawing-list" id="drawing-list" aria-label="选择零件图纸"></nav><div class="drawing-result" id="drawing-result"></div></div></div>
         </section><footer class="page-footer"><span>鸿禾 · 工艺智能工作台</span><span>REQUIREMENTS WITH EVIDENCE</span></footer>
       </main>
     </div>
   </div>
-  <dialog id="guide-dialog"><div class="dialog-header"><div><div class="eyebrow">WORKSPACE GUIDE</div><h2>两阶段，逐件追溯</h2></div><button class="icon-button" id="close-guide" type="button" aria-label="关闭使用说明">×</button></div><ol class="guide-steps"><li><strong>建立规范库</strong><p>分别导入所需的技术规范。同一份PDF只显示一条；完成解析后，可在图纸提取时重复选用。</p></li><li><strong>导入对应图纸</strong><p>为一批图纸选择一份已完成的规范。每份 PDF 独立提取，图纸直接要求与规范要求分别保留依据。</p></li><li><strong>逐件核对与导出</strong><p>每个零件以“工艺要求的名称”“量化指标”两列呈现；数值、材料牌号和禁止性要求均按提取原文保留。展开单元格可查看依据、条件与待确认说明。默认查看制造与检验，其他记录可切换查看。CSV导出当前筛选的两列，JSON保留完整资料与证据。</p></li></ol><p class="notice">全部模型阶段固定使用 DeepSeek 4.1 Flash。页面和规则覆盖记录只说明处理范围，不能证明没有遗漏；原始图纸、条件和疑点仍需核对。</p><button class="primary-button" id="guide-done" type="button">知道了</button></dialog>
+  <dialog id="guide-dialog"><div class="dialog-header"><div><div class="eyebrow">WORKSPACE GUIDE</div><h2>两阶段，逐件追溯</h2></div><button class="icon-button" id="close-guide" type="button" aria-label="关闭使用说明">×</button></div><ol class="guide-steps"><li><strong>建立规范库</strong><p>分别导入所需的技术规范。同一份PDF只显示一条；完成解析后，可在图纸提取时重复选用。</p></li><li><strong>导入对应图纸</strong><p>为一批图纸选择一份已完成的规范。每份 PDF 独立提取，以图纸要求为准，补充适用的规范检验要求，分别保留依据。</p></li><li><strong>逐件核对与导出</strong><p>每个零件以“工艺要求的名称”“量化指标”两列呈现；数值、材料牌号和禁止性要求均按提取原文保留。展开单元格可查看依据、条件与待确认说明。按铸造、机加、热处理、表面处理、刻字、检验、焊接、其他八类筛选；冲突与图纸覆盖分别突出显示。CSV导出当前筛选的两列，JSON保留完整资料与证据。</p></li></ol><p class="notice">全部模型阶段固定使用 DeepSeek 4.1 Flash。页面和规则覆盖记录只说明处理范围，不能证明没有遗漏；原始图纸、条件和疑点仍需核对。</p><button class="primary-button" id="guide-done" type="button">知道了</button></dialog>
 </body>
 </html>

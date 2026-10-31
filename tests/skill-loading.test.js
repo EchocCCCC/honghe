@@ -22,7 +22,7 @@ async function temporary(work) {
 }
 
 test('each actual Skill mode includes only its selected protocol and records the source hashes', async () => {
-  for (const [skill, modes] of [[specPath, ['extract', 'audit', 'classify']], [drawPath, ['match', 'audit']]]) {
+  for (const [skill, modes] of [[specPath, ['extract', 'audit', 'classify']], [drawPath, ['read', 'match', 'audit']]]) {
     const bundle = await loadSkillBundle(skill);
     for (const mode of modes) {
       const compiled = compileSkill(bundle, mode);
