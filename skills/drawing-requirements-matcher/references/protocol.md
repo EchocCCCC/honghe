@@ -12,7 +12,7 @@
 - id唯一，category为具体名称，requirement为完整执行指标，包含数值、符号及对应前提，不能把执行信息只放scope或parameters。scope保留全部适用条件。parameters默认[]，无需重复抄写正文已有的指标；仅后续处理确需结构化定位时填写{name,value,unit}字符串数组。
 - processCategory仅取铸造/机加/热处理/表面处理/刻字/检验/焊接/其他。informationType仅供旧接口兼容，制造操作用manufacturing，指标或检验义务用quality；不输出procurement/context。
 - sources至少一个{file,page,section,quote}，page为正整数物理页，quote为该页连续原文。若提供S1/D1映射，file只能用这些代号；否则精确用输入原名。
-- review_required为布尔，review_note写具体疑点；清晰图像、无文字层、明确条件性及有授权的图纸覆盖本身不标复核。
+- review_required为布尔，review_note写具体疑点；清晰图像、无文字层、明确条件性及有授权的图纸覆盖本身不标复核。局部疑点落实到具体条目及其关联，不为使整张通过而删掉可定位要求；复核不等于人工验收。
 - origin为drawing/specification/combined，ruleIds为规范原id数组。drawing：ruleIds=[]且有本图证据；specification：只允许关联usage=inspection规则，并有规范原始所在页证据；combined：有本图及每个链接规则原始所在页证据，comparison不能借combined名义补出图纸未给的制造要求。
 - conflict为null，或{kind,specificationRequirement,reason}。kind仅conflict/drawing_override；specificationRequirement保留与图纸不同的规范值/规定，requirement保留图纸执行值，reason说明同对象条件及取舍。冲突项必须combined、关联对照ruleIds且sources有双方原文；需同时满足的要求/依据矛盾标review_required=true，已授权专用覆盖不强制复核。默认标准号不同仍可属授权覆盖，不能仅凭编号不同制造冲突；不同试验用途/阶段及无条件不适用也不是冲突。
 
@@ -26,7 +26,7 @@ drawing字段仅用于read和audit：partNumber/name/revision/material/materialF
 
 验收边界核对：许可、豁免和局部例外也要交付。指定/非指定、加工/非加工等并列分支分别核对，不能只保留第一支的例外，或用更严指标代替原件允许范围。
 
-两列完整性核对：图示“全部尺寸均为某表面处理前/后尺寸”等全局制造约束也须成行或写入相关requirement，不能只放在drawing、scope或sources中而使两列清单丢失执行条件。确认存在的基础依据矛盾须落实conflict及双方来源，不能只在review_note声称有冲突却让conflict=null。
+执行信息完整性核对：图示“全部尺寸均为某表面处理前/后尺寸”等全局制造约束也须成行或写入相关requirement，不能只放在drawing、scope或sources中而使清单丢失执行条件。确认存在的基础依据矛盾须落实conflict及双方来源，不能只在review_note声称有冲突却让conflict=null。
 
 match及最终合并结果中，每个inspection规则恰有一个disposition={ruleId,status,reason,evidence}，status为applicable/not_applicable/overridden/needs_confirmation。applicable/overridden/needs_confirmation必须有要求关联；not_applicable不得进入有效要求。comparison不强制处置或生成行，允许在实际图纸对照中关联。evidence同source形状；覆盖需双方原文，未知规则/重复处置/漏检验处置/越界页码/别件来源不能接受。needs_confirmation及上游具体疑点传给关联要求，保留条件或待确认，不能为过校验填空、删义务或编引文。
 
@@ -92,4 +92,4 @@ drawing、summary为完整替换，须保留正确事实。其余只返回有原
 
 合并后重查全部来源、八类、冲突双证据与inspection唯一处置。疑点落实到指标、review_note或drawing.uncertainties，不只笼统放warnings；parameters和正文的确定性保持一致。
 
-若原图确认材料、原料、气密性、标准等用于匹配的条件与候选不同，仍须照实纠错并在warnings说明需重新匹配；不能为沿用旧处置而恢复错误事实。调用方会阻止发布未经重新匹配的条件变化结果。
+若原图确认材料、原料、气密性、标准等用于匹配的条件与候选不同，仍须照实纠错，在受影响条目的review_note及warnings说明需重新确认的关联；不能为沿用旧处置而恢复错误事实。未重新确认的关联保留待复核，其他已识读要求继续保留。

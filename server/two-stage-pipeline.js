@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { INFORMATION_TYPES, informationSummary, SCOPE_POLICY, usesDrawingScope, inheritableRules, ruleUsageSummary } from './information-types.js';
-import { ROOT, MODEL_ID } from './config.js';
+import { ROOT, MODEL_ID, safeError } from './config.js';
 import { runPi } from './pi.js';
 import { loadSkillBundle, compileSkill, freezeSkillPrompt } from './skills.js';
 import { augmentTableEvidence, prepareSpecification, prepareDrawingDocuments } from './pdf.js';
@@ -14,7 +14,7 @@ import { parseContract, specificationSchema, specificationPatchSchema, matchingS
 export const SPEC_SKILL = path.join(ROOT, 'skills/specification-rule-parser');
 export const DRAWING_SKILL = path.join(ROOT, 'skills/drawing-requirements-matcher');
 export const PIPELINE_VERSION = 'two-stage-v11-inspection-scope';
-export const DRAWING_PIPELINE_VERSION = 'two-stage-v21-clean-input';
+export const DRAWING_PIPELINE_VERSION = 'two-stage-v22-row-review';
 const json = (file, value) => fs.writeFile(file, JSON.stringify(value, null, 2));
 export const digest = value => createHash('sha256').update(value).digest('hex');
 export async function invokeWithContractRetry({ invoke = runPi, invocation, validate }) {
@@ -43,7 +43,11 @@ export async function invokeWithContractRetry({ invoke = runPi, invocation, vali
     return { ...retried, metadata: { ...retried.metadata, contractRetry }, validated };
   } catch (error) {
     await json(path.join(retryDirectory, 'contract-retry-result.json'), { status: 'failed', originalDirectory: invocation.directory, originalDiagnostic: diagnostic, originalMetadata: run.metadata || null, retryMetadata: retried?.metadata || null, diagnostic: String(error.message || error) });
-    throw new Error('一次校验纠正后仍未通过：' + String(error.message || error), { cause: error });
+    const failed = new Error('一次校验纠正后仍未通过：' + String(error.message || error), { cause: error });
+    // Used only to locate existing rows that an invalid patch attempted to edit.
+    // Its values are never adopted; the complete output remains in the artifacts.
+    failed.failedCandidate = retried?.result || run.result;
+    throw failed;
   }
 }
 export async function specificationFingerprint(file, parserBundle) {
@@ -288,6 +292,89 @@ export function assertMatchingConditionsUnchanged(before, after, matched = befor
   }
 }
 
+function publicReviewReason(error) {
+  return safeError(error)
+    .replace(/(?:[a-z]:[\\/]|file:\/\/\/)[^\r\n"'<>，；。]*/gi, '[本地路径]')
+    .replace(/\/(?:Users|home|tmp|var|private|mnt)\/[^\s"'<>，；。]*/g, '[本地路径]');
+}
+
+function reviewImpact(read, candidate, matched, specification) {
+  const oldRows = new Map(read.requirements.map(row => [row.id, row]));
+  const matchedRows = new Map((matched?.requirements || []).map(row => [row.id, row]));
+  const normativeIds = new Set((matched?.requirements || []).filter(row => row.origin === 'specification').map(row => row.id));
+  const drawingFiles = new Set(read.requirements.flatMap(row => row.sources.map(source => source.file)));
+  const direct = candidate.requirements.filter(row => !normativeIds.has(row.id) &&
+    (oldRows.has(row.id) || row.sources.some(source => drawingFiles.has(source.file))));
+  const afterRows = new Map(direct.map(row => [row.id, row]));
+  const affected = new Set(), related = new Set();
+  for (const id of new Set([...oldRows.keys(), ...afterRows.keys()])) {
+    const before = oldRows.get(id), after = afterRows.get(id);
+    const same = before && after &&
+      (boundedNormativeExpansion(before, after, drawingFiles) ||
+       JSON.stringify(conditionValues(technicalValues(before))) === JSON.stringify(conditionValues(technicalValues(after))) &&
+       JSON.stringify(drawingEvidence(before, drawingFiles)) === JSON.stringify(drawingEvidence(after, drawingFiles)));
+    if (!same) {
+      affected.add(id);
+      for (const row of [before, matchedRows.get(id), after]) for (const ruleId of row?.ruleIds || []) related.add(ruleId);
+    }
+  }
+  const beforeInput = drawingMatchingInput(read);
+  const afterInput = drawingMatchingInput({ ...candidate, requirements: direct });
+  const inspectionIds = new Set(inheritableRules(specification).map(rule => rule.id));
+  const profileFields = Object.keys(beforeInput).filter(key => !['technicalConstraints', 'dimensionalInspection'].includes(key));
+  const changedProfileFields = profileFields.filter(key => JSON.stringify(conditionValues(beforeInput[key])) !== JSON.stringify(conditionValues(afterInput[key])));
+  const conditionIds = new Set([...beforeInput.technicalConstraints, ...afterInput.technicalConstraints].map(row => row.id));
+  const unmappedConstraint = [...affected].some(id => conditionIds.has(id) &&
+    ![oldRows.get(id), matchedRows.get(id), afterRows.get(id)].some(row => row?.ruleIds?.some(ruleId => inspectionIds.has(ruleId))));
+  const dimensionGroupsChanged = JSON.stringify(conditionValues(beforeInput.dimensionalInspection)) !== JSON.stringify(conditionValues(afterInput.dimensionalInspection));
+  if (changedProfileFields.length || unmappedConstraint || dimensionGroupsChanged) for (const id of inspectionIds) related.add(id);
+  for (const row of candidate.requirements) if (row.ruleIds.some(id => related.has(id))) affected.add(row.id);
+  return { affectedRequirementIds: [...affected], relatedRuleIds: [...related],
+    pendingRuleIds: [...related].filter(id => inspectionIds.has(id)), changedProfileFields,
+    normativeScopeUncertain: Boolean(changedProfileFields.length || unmappedConstraint || dimensionGroupsChanged) };
+}
+
+export function reviewRuleCoverage(result, specification) {
+  const rules = inheritableRules(specification), ids = new Set(rules.map(rule => rule.id));
+  const modelDecisions = (result.dispositions || []).filter(item => ids.has(item.ruleId));
+  const pending = new Set((result.review?.pendingRuleIds || []).filter(id => ids.has(id)));
+  const decidedIds = new Set(modelDecisions.map(item => item.ruleId));
+  for (const id of ids) if (!decidedIds.has(id)) pending.add(id);
+  const confirmed = modelDecisions.filter(item => !pending.has(item.ruleId));
+  const count = status => confirmed.filter(item => item.status === status).length;
+  return { ...result.ruleCoverage, total: ids.size, decided: confirmed.length, modelDecided: modelDecisions.length,
+    pending: pending.size, applicable: count('applicable'), notApplicable: count('not_applicable'), overridden: count('overridden'), needsConfirmation: count('needs_confirmation'),
+    backgroundRecords: (specification.rules || []).filter(rule => rule.informationType === 'context').length,
+    ...(usesDrawingScope(specification) ? { comparisonRecords: (specification.rules || []).filter(rule => rule.usage === 'comparison').length } : {}),
+    note: pending.size ? `已有模型处置${modelDecisions.length}项；${pending.size}项尚需按复核后的条件确认，未计为已确认处置。` : result.ruleCoverage?.note || '模型处置完整不代表已经人工验收。' };
+}
+
+// Reprocessing accepts saved, source-checked artifacts, not arbitrary model-result
+// files. Revalidation below still rejects unknown rules, foreign files and pages.
+// No technical value or model disposition is rewritten to make a candidate pass.
+export function retainDrawingCandidate({ read, matched, audited, specification, drawingPrepared, specPrepared, reason = '', partialStage = '', pendingAllNormative = false, affectedIds = [] }) {
+  const checkedRead = validateDrawingRead(parseContract(matchingSchema, read, '已保存图纸识读'), drawingPrepared);
+  const checkedMatched = matched && validateMatching(parseContract(matchingSchema, matched, '已保存规范匹配'), specification, drawingPrepared, specPrepared);
+  const candidate = audited ? validateMatching(parseContract(matchingSchema, audited, '已保存原图复核'), specification, drawingPrepared, specPrepared) : checkedMatched || checkedRead;
+  const impact = audited ? reviewImpact(checkedRead, candidate, checkedMatched, specification) :
+    { affectedRequirementIds: [], relatedRuleIds: [], pendingRuleIds: [], changedProfileFields: [], normativeScopeUncertain: false };
+  const pending = new Set(impact.pendingRuleIds), affected = new Set([...impact.affectedRequirementIds, ...affectedIds]);
+  const related = new Set(impact.relatedRuleIds);
+  if (pendingAllNormative || !checkedMatched) for (const rule of inheritableRules(specification)) { pending.add(rule.id); related.add(rule.id); }
+  for (const row of candidate.requirements) if (row.ruleIds.some(id => related.has(id))) affected.add(row.id);
+  const note = publicReviewReason(reason || (partialStage ? `${partialStage}未完成，保留此前已通过来源检查的提取内容。` : '原图复核修改了图纸内容或依据，相关要求及规范适用性需确认。'));
+  const status = partialStage ? 'partial' : reason || affected.size || pending.size || impact.changedProfileFields.length ? 'needs_review' : 'completed';
+  const result = { ...candidate, requirements: candidate.requirements.map(row => !affected.has(row.id) ? row : { ...row, review_required: true,
+    review_note: [...new Set([row.review_note, note].filter(Boolean))].join('；') }),
+    warnings: [...new Set([...candidate.warnings, ...(status === 'completed' ? [] : [`流程复核提示：${note}`])])],
+    review: { status, mode: partialStage ? 'partial-extraction' : 'source-grounded-row-review',
+      affectedRequirementIds: [...affected], pendingRuleIds: [...pending], changedProfileFields: impact.changedProfileFields,
+      normativeScopeUncertain: impact.normativeScopeUncertain || pendingAllNormative || !checkedMatched,
+      ...(partialStage ? { incompleteStage: partialStage } : {}), note: status === 'completed' ? '保留已验证的机器提取内容，未经人工验收。' : note } };
+  result.ruleCoverage = reviewRuleCoverage(result, specification);
+  return result;
+}
+
 export async function matchDrawing({ file, directory, specificationJob, specificationDirectory, stage = 'all', onProgress = () => {}, invoke = runPi, prepare = prepareDrawingDocuments, initialRun, retryId = '' }) {
   const bundle = await loadSkillBundle(DRAWING_SKILL);
   const skillDirectory = retryId ? path.join(directory, 'skill-retry-' + retryId) : directory;
@@ -322,7 +409,11 @@ export async function matchDrawing({ file, directory, specificationJob, specific
     `<SPECIFICATION_ORIGINAL_TEXT>\n${aliasSourceText(await fs.readFile(specPrepared.sourcePath, 'utf8'), aliases)}\n</SPECIFICATION_ORIGINAL_TEXT>\n` +
     `<ONE_DRAWING_SOURCE>\n${drawingText}\n</ONE_DRAWING_SOURCE>\n` + ocrContext;
   const artifact = async file => ({ artifact: path.relative(directory, file).split(path.sep).join('/'), sha256: digest(await fs.readFile(file)) });
-  let roundDirectory = directory, rematch = null, initial, review, audited, guarded, result, conditionsFingerprint, reusedMatching = false;
+  let roundDirectory = directory, rematch = null, initial, review, audited, guarded, result, conditionsFingerprint, matchedFingerprint, reusedMatching = false;
+  let lastValid = read, retainedReview = null, matchingBatches = 0, auditBatches = 0;
+  const affectedCandidateIds = error => [...new Set(['replacements', 'bindings', 'removals'].flatMap(key =>
+    Array.isArray(error.failedCandidate?.[key]) ? error.failedCandidate[key].map(item => item?.id) : [])
+    .filter(id => lastValid.requirements.some(row => row.id === id)))];
   for (let round = 0; round <= 1; round++) {
     const conditions = drawingMatchingInput(read);
     conditionsFingerprint = digest(JSON.stringify({ conditions: conditionValues(conditions),
@@ -333,27 +424,49 @@ export async function matchDrawing({ file, directory, specificationJob, specific
     await fs.writeFile(sourcePath, taskContext + rulePackage + `<DRAWING_MATCHING_CONDITIONS_DATA>\n${modelInputJson(mapSourceNames(conditions, aliases))}\n</DRAWING_MATCHING_CONDITIONS_DATA>\n`);
     onProgress('matching', round ? '基于原图审计更正后的明确条件重新匹配规范（最多一次）' : '根据明确图纸条件追加规范检验及冲突关联，不改写图纸要求');
     let cached = round === 0 ? initialRun : undefined;
-    reusedMatching = Boolean(cached);
-    initial = await invokeWithContractRetry({ invoke: async options => { if (cached) { const run = cached; cached = undefined; return run; } return invoke(options); },
+    let currentReuse = Boolean(cached);
+    matchingBatches++;
+    try { initial = await invokeWithContractRetry({ invoke: async options => { if (cached) { const run = cached; cached = undefined; return run; } currentReuse = false; return invoke(options); },
       invocation: { directory: path.join(roundDirectory, round === 0 && retryId ? `matching-retry-${retryId}` : 'matching'), sourcePath, images: [], ...matchSkill, model: MODEL_ID,
         prompt: '任务模式：规范匹配差量。无图像，仅用已确认的图纸条件及完整规则包；按match协议返回新增规范行、绑定与全部检验处置，不返回或改写图纸字段。',
         onProgress: message => onProgress('matching', message) },
-      validate: raw => applyNormMatchDelta(read, mapSourceNames(raw, aliases, true), specification, prepared, specPrepared) });
+      validate: raw => applyNormMatchDelta(read, mapSourceNames(raw, aliases, true), specification, prepared, specPrepared) }); }
+    catch (error) {
+      await json(path.join(roundDirectory, 'matching-incomplete.json'), { reason: String(error.message || error), retained: initial ? 'previous-validated-candidate' : 'drawing-read.json' });
+      result = retainDrawingCandidate({ read, matched: initial ? lastValid : undefined, specification, drawingPrepared: prepared, specPrepared,
+        partialStage: '规范匹配', pendingAllNormative: true, affectedIds: affectedCandidateIds(error),
+        reason: `规范匹配未完成；仅保留此前通过结构和来源检查的提取内容，规范补充及适用性尚未确认。${publicReviewReason(error)}` });
+      retainedReview = result.review;
+      break;
+    }
+    matchedFingerprint = conditionsFingerprint;
+    reusedMatching = currentReuse;
     result = initial.validated;
+    lastValid = result;
     await json(path.join(roundDirectory, 'norm-match-delta.json'), initial.result);
     await json(path.join(roundDirectory, 'matched-result.json'), result);
     let candidateNumbers = { findings: [] };
     try { candidateNumbers = addNumericCoverageWarnings(prepared, result); } catch { /* Optional numeric diagnostics do not replace source validation. */ }
     const reviewPath = path.join(roundDirectory, 'review-input.txt');
     await fs.writeFile(reviewPath, context + `\n<CONTRACT_DIAGNOSTIC_DATA>\n${modelInputJson({ numericReviewFindings: mapSourceNames(candidateNumbers.findings, aliases) })}\n</CONTRACT_DIAGNOSTIC_DATA>\n<CANDIDATE_RESULT_DATA>\n${modelInputJson(mapSourceNames(result, aliases))}\n</CANDIDATE_RESULT_DATA>\n`);
-    onProgress('auditing', round ? '重新匹配后再次原图复核；若条件再次变化则明确失败' : '独立重读图纸，核对漏项、图纸覆盖和规则适用理由');
-    review = await invokeWithContractRetry({ invoke, invocation: { directory: path.join(roundDirectory, round === 0 && retryId ? `audit-retry-${retryId}` : 'audit'), sourcePath: reviewPath, images: prepared.images, ...auditSkill, model: MODEL_ID,
+    onProgress('auditing', round ? '重新匹配后再次原图复核；有差异的要求及关联项保留待复核' : '独立重读图纸，核对漏项、图纸覆盖和规则适用理由');
+    auditBatches++;
+    try { review = await invokeWithContractRetry({ invoke, invocation: { directory: path.join(roundDirectory, round === 0 && retryId ? `audit-retry-${retryId}` : 'audit'), sourcePath: reviewPath, images: prepared.images, ...auditSkill, model: MODEL_ID,
       prompt: '任务模式：逐图独立复核。先独立重读原图，再核对候选和诊断；按已加载协议只返回有依据的改动补丁。', onProgress: message => onProgress('auditing', message) }, validate: raw => {
         const audited = applyDrawingPatch(result, mapSourceNames(raw, aliases, true), specification, prepared, specPrepared);
         const guarded = applyConservativeDrawingGuards(audited.result, specification, prepared);
         return { audited, guarded, result: validateMatching(guarded.result, specification, prepared, specPrepared) };
-      } });
+      } }); }
+    catch (error) {
+      await json(path.join(roundDirectory, 'audit-incomplete.json'), { reason: String(error.message || error), retained: 'matched-result.json', rejectedPatchApplied: false });
+      result = retainDrawingCandidate({ read, matched: lastValid, specification, drawingPrepared: prepared, specPrepared,
+        partialStage: '原图复核', pendingAllNormative: true, affectedIds: affectedCandidateIds(error),
+        reason: `原图复核未完成或补丁未通过结构/来源检查；未应用该补丁，保留此前合法清单。${publicReviewReason(error)}` });
+      retainedReview = result.review;
+      break;
+    }
     ({ audited, guarded } = review.validated);
+    lastValid = review.validated.result;
     await json(path.join(roundDirectory, 'audited-result.json'), audited.result);
     // A valid audit correction is never a contract-retry diagnostic asking the
     // model to restore old facts. At most one source-grounded rebase is allowed.
@@ -361,12 +474,20 @@ export async function matchDrawing({ file, directory, specificationJob, specific
     catch (error) {
       await json(path.join(roundDirectory, 'rematch-required.json'), { reason: error.message, round, automaticRematchLimit: 1, auditedResult: 'audited-result.json',
         originalConditions: conditions, correctedConditions: drawingMatchingInput(audited.result), auditMetadata: review.metadata });
-      if (round === 1) throw new Error('一次重新匹配后原图复核再次改变匹配条件，本次不发布结果：' + error.message, { cause: error });
+      if (round === 1) {
+        result = retainDrawingCandidate({ read, matched: result, audited: lastValid, specification, drawingPrepared: prepared, specPrepared,
+          reason: '一次重新匹配后仍有图纸内容或证据差异；保留复核后的清单，仅将受影响要求及关联规范标为待复核。' + publicReviewReason(error) });
+        retainedReview = result.review;
+        break;
+      }
       let rebased;
       try { rebased = rebaselineDrawingRead(read, audited.result, result, prepared); }
       catch (projectionError) {
         await json(path.join(roundDirectory, 'rematch-rejected.json'), { reason: projectionError.message, sourceRead: 'drawing-read.json', sourceAudit: 'audited-result.json' });
-        throw new Error('原图复核改变匹配条件，但无法安全重基并重新匹配：' + projectionError.message, { cause: projectionError });
+        result = retainDrawingCandidate({ read, matched: result, audited: lastValid, specification, drawingPrepared: prepared, specPrepared,
+          reason: '图纸与规范混合条目不能安全分离重匹配；保留原图复核后的内容，相关要求及规范适用性待确认。' + publicReviewReason(projectionError) });
+        retainedReview = result.review;
+        break;
       }
       const nextDirectory = path.join(directory, 'rematch-1');
       await fs.mkdir(nextDirectory);
@@ -385,18 +506,23 @@ export async function matchDrawing({ file, directory, specificationJob, specific
     break;
   }
   if (rematch) {
-    Object.assign(rematch, { matchingConditions: await artifact(path.join(roundDirectory, 'matching-conditions.json')),
-      finalMatching: await artifact(path.join(roundDirectory, 'matched-result.json')), finalAudit: await artifact(path.join(roundDirectory, 'audited-result.json')) });
-    await json(path.join(roundDirectory, 'rematch-result.json'), { status: 'completed', ...rematch });
+    for (const [key, filename] of [['matchingConditions', 'matching-conditions.json'], ['finalMatching', 'matched-result.json'], ['finalAudit', 'audited-result.json']]) {
+      const file = path.join(roundDirectory, filename);
+      try { rematch[key] = await artifact(file); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    await json(path.join(roundDirectory, 'rematch-result.json'), { status: retainedReview?.status || 'completed', ...rematch });
   }
   const numeric = addNumericCoverageWarnings(prepared, result);
   result.warnings = [...new Set([...specification.warnings.map(w => `规范库提示：${w}`), ...prepared.warnings, ...result.warnings, ...numeric.warnings])];
-  result.sourceCoverage = { ...coverage(prepared), extractionBatches: 2 + (rematch ? 1 : 0), reviewBatches: 1 + (rematch ? 1 : 0), numericReviewFindings: numeric.findings };
+  result.sourceCoverage = { ...coverage(prepared), extractionBatches: 1 + matchingBatches, reviewBatches: auditBatches, numericReviewFindings: numeric.findings };
   const specificationCounts = informationSummary(specification.rules);
   result.specification = { id: specificationJob.id, number: specification.metadata.number, version: specification.metadata.version, scopePolicy: specification.scopePolicy, ruleCount: inheritableRules(specification).length, recordCount: specificationCounts.total, ...ruleUsageSummary(specification.rules), sourceSha256: specificationJob.fingerprint.sourceSha256 };
   result.run = { model: MODEL_ID, pipelineVersion: DRAWING_PIPELINE_VERSION, skillBundleSha256: bundle.sha256, reading: reading.metadata,
-    matching: { ...initial.metadata, conditionsFingerprint }, reusedMatching, attemptId: retryId, sourceAliases: aliases, ...(rematch ? { rematch } : {}) };
-  result.review = { status: 'completed', model: MODEL_ID, mode: 'source-grounded-patch', changes: audited.changes, conservativeGuards: guarded.changes, metadata: review.metadata, note: '补丁合并后经过完整结构、来源位置与规则处置检查；未经确认的受检壁厚与试验压力用途仅保留条件规则，图面标准号缺乏逐字依据时标候选。这些检查不证明语义没有遗漏。' };
+    matching: initial ? { ...initial.metadata, conditionsFingerprint: matchedFingerprint } : null, reusedMatching, attemptId: retryId, sourceAliases: aliases, ...(rematch ? { rematch } : {}) };
+  result.review = { ...(retainedReview || { status: 'completed', mode: 'source-grounded-patch' }), model: MODEL_ID,
+    changes: audited?.changes || [], conservativeGuards: guarded?.changes || [], metadata: review?.metadata || null,
+    note: retainedReview?.note || '补丁合并后经过完整结构、来源位置与规则处置检查；这些检查不证明语义没有遗漏，也不表示人工验收。' };
+  if (retainedReview) result.ruleCoverage = reviewRuleCoverage(result, specification);
   await json(path.join(directory, 'result.json'), result);
   return result;
 }

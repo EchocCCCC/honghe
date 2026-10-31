@@ -9,6 +9,7 @@ const slice = (start, end) => {
   assert.ok(a >= 0 && b > a); return source.slice(a, b);
 };
 const helpers = slice('  function savedDrawingRows(', '  function renderFiles(');
+const statusHelpers = slice('  function drawingHasResult(', '  function informationSummary(');
 const batchLoader = slice('  async function loadBatch(', '  function schedulePoll(');
 const specSelector = slice('  async function selectSpec(', '  function savedDrawingRows(');
 const drawing = (id, extra = {}) => ({ id, name: `${id}.pdf`, sourceSha256: id, status: 'completed', hasResult: true, requirementCount: 3, ...extra });
@@ -19,14 +20,15 @@ const deferred = () => { let resolve, reject; const promise = new Promise((yes, 
 function fixture(specId, responder, overrides = {}) {
   const state = { specId, specifications: [], batchId: null, batch: null, drawingId: null, resultKey: '', filter: 'core', search: '', savedRequest: 0, savedSpecId: specId, savedBatches: [], savedLoading: false, savedError: '', ...overrides };
   const created = [];
-  const node = (tag, className, textContent) => ({ tag, className, textContent, children: [], setAttribute() {}, addEventListener() {}, append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; } });
+  const node = (tag, className, textContent) => ({ tag, className, textContent, children: [], classList: { add() {} }, setAttribute() {}, addEventListener() {}, append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; } });
   const nodes = { 'new-drawings': { open: false }, 'results-heading': { scrollIntoView() { nodes.scrolls++; } }, 'saved-drawings-list': node('div'), 'saved-drawings-count': node('span'), 'refresh-drawings': node('button'), 'spec-detail': node('div'), 'spec-select': node('select'), scrolls: 0 };
   const calls = [], alerts = [], rendered = [];
   const context = vm.createContext({ state, list: value => Array.isArray(value) ? value : [], enc: encodeURIComponent,
     api: async (url, options) => { calls.push({ url, options }); return responder(url, options); },
     el: (tag, cls, text) => { const item = node(tag, cls, text); created.push(item); return item; }, badge: status => node('span', 'status', status), str: String, stageNames: { all: '全部阶段' }, active: value => Boolean(value) && !['completed', 'failed', 'partial'].includes(value),
+    needsReview: row => row.review_required === true, statusNames: { completed: '已完成', failed: '处理失败' },
     $: id => nodes[id], showAlert: message => alerts.push(message), updateControls() {}, updateUrl() {}, schedulePoll() {}, renderSpecList() {}, updateSpecSummary() {}, renderSpec() {}, fetchSpecJob: id => responder(`/api/specifications/${id}`), renderBatch() { rendered.push(state.batch?.id || null); } });
-  vm.runInContext(`${helpers}\n${batchLoader}\n${specSelector}\nvar actualRenderSavedDrawings = renderSavedDrawings; renderSavedDrawings = () => {};`, context);
+  vm.runInContext(`${statusHelpers}\n${helpers}\n${batchLoader}\n${specSelector}\nvar actualRenderSavedDrawings = renderSavedDrawings; renderSavedDrawings = () => {};`, context);
   return { state, calls, alerts, nodes, rendered, created, rows: context.savedDrawingRows, refresh: context.refreshSavedDrawings, open: context.openSavedDrawing, load: context.loadBatch, render: context.actualRenderSavedDrawings, select: context.selectSpec };
 }
 
@@ -130,8 +132,18 @@ test('the live-batch overlay cannot promote a broken or unfinished result into a
     const saved = batch('batch', 'spec', [drawing('part')]);
     const f = fixture('spec', () => {}, { savedBatches: [saved], batch: { ...saved, drawings: [{ id: 'part', name: 'part.pdf', status, result }] } });
     f.render();
-    assert.equal(f.nodes['saved-drawings-count'].textContent, `${expected} 张已完成 / 共 1 张`);
+    assert.equal(f.nodes['saved-drawings-count'].textContent, `${expected} 张已有清单 / 共 1 张`);
     assert.equal(f.created.find(item => item.className === 'saved-drawing-action').textContent, expected ? '查看结果 →' : '查看处理状态 →');
+  }
+});
+
+test('saved summaries retain partial or row-review result labels instead of calling them approved results', () => {
+  for (const [reviewStatus, label] of [['needs_review', '已提取 · 待复核'], ['partial', '部分提取 · 待复核']]) {
+    const saved = batch('batch', 'spec', [drawing('part', { reviewStatus, reviewRequiredCount: 2 })]);
+    const f = fixture('spec', () => {}, { savedBatches: [saved] });
+    f.render();
+    assert.equal(f.nodes['saved-drawings-count'].textContent, '1 张已有清单 / 共 1 张');
+    assert.equal(f.nodes['saved-drawings-list'].children[0].children[1].children[0].textContent, label);
   }
 });
 

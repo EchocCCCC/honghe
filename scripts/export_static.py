@@ -65,7 +65,7 @@ def snapshot(base, state, allow_incomplete=False):
             output = drawing.get("result") or {}
             current_attempt = drawing.get("attemptId", "")
             attempt_matches = not current_attempt or output.get("run", {}).get("attemptId") == current_attempt
-            published = drawing["status"] == "completed" and bool(output.get("requirements")) and attempt_matches
+            published = drawing["status"] in ("completed", "partial") and bool(output.get("requirements")) and attempt_matches
             if not published and not allow_incomplete:
                 raise ValueError("Latest selected drawing result is incomplete: " + batch_id + "/" + drawing["id"] + " (" + drawing["status"] + ")")
             item = {
@@ -76,7 +76,7 @@ def snapshot(base, state, allow_incomplete=False):
                 }
             if not published:
                 # Ignore any retained result on failed/pending jobs, and never read audited candidates.
-                reason = drawing.get("error") or ("当前结果与本轮尝试不一致，未发布正式结果。" if not attempt_matches else drawing.get("message"))
+                reason = drawing.get("error") or ("当前结果与本轮尝试不一致，未展示旧清单。" if not attempt_matches else drawing.get("message"))
                 item.update({"error": public_error(reason), "scopePolicy": result.get("scopePolicy", ""),
                              "drawing": {}, "summary": "", "requirements": [], "warnings": [], "dispositions": [],
                              "model": "", "pipelineVersion": ""})
@@ -86,9 +86,11 @@ def snapshot(base, state, allow_incomplete=False):
                     "drawing": pick(output["drawing"], PROFILE_KEYS), "summary": output.get("summary", ""),
                     "requirements": [pick(row, ROW_KEYS) for row in output["requirements"]],
                     "warnings": output.get("warnings", []),
+                    "review": {**pick(output.get("review", {}), ("status", "pendingRuleIds", "affectedRequirementIds")), "note": public_error(output.get("review", {}).get("note", ""))},
                     "dispositions": [pick(row, ("ruleId", "status", "reason", "evidence", "usage")) for row in output.get("dispositions", [])],
                     "model": output.get("run", {}).get("model", "deepseek-flash"),
                     "pipelineVersion": output.get("run", {}).get("pipelineVersion", ""),
+                    "processingMode": output.get("run", {}).get("processingMode", ""),
                 })
             drawings.append(item)
         if not drawings:
@@ -123,6 +125,7 @@ HTML = r'''<!doctype html>
 @media(max-width:760px){.wrap{padding:18px 13px}.top{align-items:flex-start;margin-bottom:18px}.top h1{font-size:23px}.top-actions button{font-size:12px;padding:8px 10px}.top-actions{max-width:130px}.brand{font-size:10px}.stats{margin-bottom:16px}.stat{display:block;padding:13px 16px}.stat b{font-size:26px;display:block}.stat span{font-size:11px}.layout{grid-template-columns:1fr}.side{position:static;max-height:none}.specs{display:grid;grid-template-columns:1fr 1fr;gap:9px}.spec-button{margin:0;padding:11px}.spec-button strong{font-size:13px}.spec-button span{font-size:11px}.draw-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.side hr{margin:15px 0}.section-head h2{font-size:18px}.content{padding:17px 13px}.section-head{padding:17px 15px 0}.scope{margin-bottom:10px}.result-head h3{font-size:19px}.result-head{display:block}.result-head>.badge{display:inline-block;margin-top:10px}th,td{padding:12px 10px}th:first-child{width:32%}td{font-size:12px}.notice{font-size:12px}.toolbar{margin-top:18px}.search{min-width:100%;width:100%}.table-caption{align-items:flex-start}.check{font-size:12px}}
 @media print{@page{size:A4;margin:13mm}body{background:white;color:#152e25;font-size:10pt}.wrap{padding:0;max-width:none}.top-actions,.stats,.side,.tabs,.toolbar,.note,.aux,footer,.toast,.evidence{display:none!important}.layout{display:block}.section-head,.content{border:0;padding:0;margin:14px 0}.top{margin-bottom:14px}.top h1{font-size:20pt}.section-head h2{font-size:14pt}.result-head h3{font-size:16pt}.notice{break-inside:avoid;background:white;font-size:9pt}.table-wrap{overflow:visible}thead{display:table-header-group}tr{break-inside:auto}th,td{padding:9px;font-size:9pt}th{background:#eee}.table-caption{font-size:9pt}.profile span{background:white}.sub,.scope{font-size:9pt}}
 .category-select{padding:8px 10px;border:1px solid var(--line);border-radius:7px;background:white;color:var(--ink);max-width:100%}.process-chip{display:inline-block;margin-top:7px;padding:1px 7px;border-radius:4px;border:1px solid #cbddd1;background:var(--pale);font-size:11px;color:var(--green);font-weight:400}.conflict-chip{display:inline-block;margin-top:7px;font-size:11px;font-weight:500;color:#a33029}.conflict-chip.drawing_override{color:var(--amber)}.conflict-box{border-left:3px solid #c24c42;padding:10px 12px;background:#fff3ef;margin-top:10px;font-size:12px;color:#7f332b}.conflict-box.drawing_override{border-left-color:#b89a55;background:var(--amber-bg);color:var(--amber)}.conflict-box p{margin:5px 0;white-space:pre-wrap}.conflict-box strong{display:block}.source-kind{font-size:11px;color:var(--muted)}tr.has-conflict>td:first-child{box-shadow:inset 3px 0 #c24c42}tr.has-override>td:first-child{box-shadow:inset 3px 0 #b89a55}
+th:first-child{width:26%}th:last-child{width:14%}.stage-cell{font-weight:500;color:var(--green);border-left:1px solid var(--line);white-space:normal}@media(max-width:760px){th:first-child{width:29%}th:last-child{width:20%}}
 </style>
 </head>
 <body>
@@ -146,9 +149,9 @@ HTML = r'''<!doctype html>
         <details class="aux" id="uncertainties" hidden><summary id="uncertainty-title"></summary><ul id="uncertainty-list"></ul></details>
         <details class="aux" id="applicability" hidden><summary id="applicability-title"></summary><ul id="applicability-list"></ul></details>
         <details class="aux" id="warnings" hidden><summary id="warning-title"></summary><ul id="warning-list"></ul></details>
-        <div class="toolbar"><label class="search"><span class="sr-only">搜索要求名称、指标或来源</span><input type="search" id="search" placeholder="搜索要求名称、指标或来源…" autocomplete="off"></label><select class="category-select" id="category-filter" aria-label="按工艺类别筛选"></select><select class="category-select" id="conflict-filter" aria-label="按冲突或覆盖筛选"><option value="">全部状态</option><option value="conflict">要求冲突</option><option value="drawing_override">图纸覆盖</option></select><select class="category-select" id="usage-filter" aria-label="按规范用途筛选" hidden><option value="inspection">用于补充的检验要求</option><option value="comparison">仅用于冲突对照</option><option value="all">全部规范依据</option></select><label class="check"><input type="checkbox" id="pending-only">仅看待复核项</label><label class="check" id="context-control" hidden><input type="checkbox" id="include-context">包含背景说明</label><div class="export-group"><button type="button" id="export-csv">导出当前两列 CSV</button><button type="button" id="export-json">导出当前 JSON</button><button type="button" id="print">打印当前结果</button></div></div>
+        <div class="toolbar"><label class="search"><span class="sr-only">搜索要求名称、指标或来源</span><input type="search" id="search" placeholder="搜索要求名称、指标或来源…" autocomplete="off"></label><select class="category-select" id="category-filter" aria-label="按工艺类别筛选"></select><select class="category-select" id="conflict-filter" aria-label="按冲突或覆盖筛选"><option value="">全部状态</option><option value="conflict">要求冲突</option><option value="drawing_override">图纸覆盖</option></select><select class="category-select" id="usage-filter" aria-label="按规范用途筛选" hidden><option value="inspection">用于补充的检验要求</option><option value="comparison">仅用于冲突对照</option><option value="all">全部规范依据</option></select><label class="check"><input type="checkbox" id="pending-only">仅看待复核项</label><label class="check" id="context-control" hidden><input type="checkbox" id="include-context">包含背景说明</label><div class="export-group"><button type="button" id="export-csv">导出当前三列 CSV</button><button type="button" id="export-json">导出当前 JSON</button><button type="button" id="print">打印当前结果</button></div></div>
         <div class="table-caption"><span id="table-count" aria-live="polite"></span><span>展开指标下方可查看来源和适用条件</span></div>
-        <div class="table-wrap"><table aria-label="工艺要求"><thead><tr><th scope="col">工艺要求的名称</th><th scope="col">量化指标</th></tr></thead><tbody id="requirements"></tbody></table><div class="empty" id="empty" hidden>没有符合当前筛选条件的要求。</div></div>
+        <div class="table-wrap"><table aria-label="工艺要求"><thead><tr><th scope="col">工艺要求的名称</th><th scope="col">量化指标</th><th scope="col">阶段</th></tr></thead><tbody id="requirements"></tbody></table><div class="empty" id="empty" hidden>没有符合当前筛选条件的要求。</div></div>
       </section>
     </main>
   </div>
@@ -168,11 +171,14 @@ const isPending=row=>row.review_required===true;
 const background=row=>row.informationType==='context';
 const processNames=['铸造','机加','热处理','表面处理','刻字','检验','焊接','其他'];
 const scoped=value=>value.scopePolicy==='drawing-plus-inspection-v1'||(value.requirements||value.rules||[]).some(r=>processNames.includes(r.processCategory));
+const processStage=row=>processNames.includes(row.processCategory)?row.processCategory:'待分类';
 const conflictKind=row=>['conflict','drawing_override'].includes(row.conflict?.kind)?row.conflict.kind:'';
-const published=d=>d.published!==false&&(!d.status||d.status==='completed')&&d.requirements.length>0;
-const statusLabel=d=>published(d)?'已发布正式结果':({failed:'处理失败',queued:'等待处理',preparing:'准备图纸',reading:'识读图纸',matching:'匹配检验要求',auditing:'原图复核',completed:'结果不完整'}[d.status]||'尚未完成');
-function snapshotStatusText(drawings){const complete=drawings.filter(published).length;const failed=drawings.filter(d=>d.status==='failed').length;return '本轮 '+drawings.length+' 张图纸 · '+complete+' 张已发布正式结果 · '+failed+' 张失败 · '+(drawings.length-complete-failed)+' 张待完成';}
-function statusCard(d){const box=node('div',null,published(d)?'note':'notice');if(!published(d))box.style.cssText=d.status==='failed'?'border-color:#d59b94;background:#fff3ef;color:#8b3028':'';box.append(node('strong',statusLabel(d)+(published(d)?'':' · 本次无正式结果')));if(!published(d))box.append(node('p',d.error||'本轮处理尚未完成，尚无可交付的工艺要求。'));const times=[];if(d.batchCreatedAt)times.push('批次建立 '+d.batchCreatedAt);if(d.batchUpdatedAt)times.push('本轮更新 '+d.batchUpdatedAt);if(d.attemptId)times.push('尝试 '+d.attemptId.slice(0,8));if(times.length)box.append(node('p',times.join(' · ')));return box;}
+const published=d=>d.published!==false&&(!d.status||['completed','partial'].includes(d.status))&&d.requirements.length>0;
+const resultNeedsReview=d=>published(d)&&(['needs_review','partial'].includes(d.review?.status)||d.requirements.some(r=>r.review_required===true));
+const statusLabel=d=>published(d)?(d.review?.status==='partial'?'部分提取 · 待复核':resultNeedsReview(d)?'已提取 · 待复核':'已提取清单'):({failed:'处理失败',queued:'等待处理',preparing:'准备图纸',reading:'识读图纸',matching:'匹配检验要求',auditing:'原图复核',completed:'结果不完整'}[d.status]||'尚未完成');
+function pendingApplicability(specification,drawing){const decisions=drawing.dispositions||[];const pendingIds=new Set(drawing.review?.pendingRuleIds||[]);const ids=new Set([...decisions.filter(d=>d.status==='needs_confirmation').map(d=>d.ruleId),...pendingIds]);const names={applicable:'适用',not_applicable:'不适用',overridden:'图纸覆盖',needs_confirmation:'待确认'};return [...ids].map(id=>{const decision=decisions.find(d=>d.ruleId===id);const rule=specification.rules.find(r=>r.id===id);const label=pendingIds.has(id)?decision?'待复核（原模型：'+(names[decision.status]||decision.status)+'）':'待复核（尚未匹配）':'待确认';return id+(rule?' '+rule.category:'')+'：'+label+'；'+(decision?.reason||'尚未得到可核对的规范匹配处置。');});}
+function snapshotStatusText(drawings){const complete=drawings.filter(published).length;const review=drawings.filter(resultNeedsReview).length;const failed=drawings.filter(d=>d.status==='failed'&&!published(d)).length;return '本轮 '+drawings.length+' 张图纸 · '+complete+' 张已有清单（'+review+' 张待复核） · '+failed+' 张失败 · '+(drawings.length-complete-failed)+' 张待完成';}
+function statusCard(d){const box=node('div',null,published(d)&&!resultNeedsReview(d)?'note':'notice');if(!published(d))box.style.cssText=d.status==='failed'?'border-color:#d59b94;background:#fff3ef;color:#8b3028':'';box.append(node('strong',statusLabel(d)+(published(d)?'':' · 本次无有效清单')));if(!published(d))box.append(node('p',d.error||'本轮处理尚未完成，尚无可展示的工艺要求。'));else if(resultNeedsReview(d))box.append(node('p',d.review?.note||'已保留本轮可提取的清单；待复核条目及关联规范需逐项核对，提取完成不表示验收通过。'));if(published(d)&&d.processingMode==='reprocess_existing')box.append(node('p','已重新整理上轮提取结果，保留原始模型输出及本轮复核标记。'));const times=[];if(d.batchCreatedAt)times.push('批次建立 '+d.batchCreatedAt);if(d.batchUpdatedAt)times.push('本轮更新 '+d.batchUpdatedAt);if(d.attemptId)times.push('尝试 '+d.attemptId.slice(0,8));if(times.length)box.append(node('p',times.join(' · ')));return box;}
 function categoryOptions(rows){$('category-filter').replaceChildren(...['',...processNames].map(value=>{const option=node('option',value?value+' · '+rows.filter(r=>r.processCategory===value).length:'全部工艺 · '+rows.length);option.value=value;return option;}));}
 function flash(text){clearTimeout(toastTimer);$('toast').textContent=text;$('toast').hidden=false;toastTimer=setTimeout(()=>$('toast').hidden=true,2800);}
 function download(name,text,type){const blob=new Blob([text],{type});const url=URL.createObjectURL(blob);const a=node('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);flash('已生成下载文件');}
@@ -184,7 +190,7 @@ function selectSpec(next){spec=next;drawing=next.drawings[0];clearFilters();rend
 function selectDrawing(next){drawing=next;mode='drawing';clearFilters();render();}
 function renderNavigation(){
   $('spec-list').replaceChildren(...specs.map(s=>{const b=node('button',null,'spec-button');b.type='button';b.setAttribute('aria-pressed',String(s===spec));b.append(node('strong',s.metadata.number),node('span',s.metadata.title),node('span',s.drawings.length+' 张图纸 · '+(scoped(s)?s.rules.filter(r=>r.usage==='inspection').length+' 条检验候选':s.rules.length+' 条历史规范记录')));b.addEventListener('click',()=>selectSpec(s));return b;}));
-  $('drawing-list').replaceChildren(...spec.drawings.map(d=>{const b=node('button',null,'drawing-button');b.type='button';b.setAttribute('aria-current',String(d===drawing&&mode==='drawing'));b.append(node('strong',d.filename.replace(/_内部参考副本/g,'').replace(/\.pdf$/i,'')),node('small',published(d)?d.requirements.length+' 项要求 · '+statusLabel(d):statusLabel(d)+' · 无正式结果'));b.addEventListener('click',()=>selectDrawing(d));return b;}));
+  $('drawing-list').replaceChildren(...spec.drawings.map(d=>{const b=node('button',null,'drawing-button');b.type='button';b.setAttribute('aria-current',String(d===drawing&&mode==='drawing'));b.append(node('strong',d.filename.replace(/_内部参考副本/g,'').replace(/\.pdf$/i,'')),node('small',published(d)?d.requirements.length+' 项要求 · '+statusLabel(d):statusLabel(d)+' · 无有效清单'));b.addEventListener('click',()=>selectDrawing(d));return b;}));
 }
 function render(){
   renderNavigation();$('spec-title').textContent=spec.metadata.title;$('spec-version').textContent=spec.metadata.number+' · '+spec.metadata.version;$('spec-scope').textContent=spec.metadata.scope;
@@ -199,7 +205,7 @@ function render(){
   const warnings=isSpec?spec.warnings:drawing.warnings;const review=warnings.filter(w=>typeof w==='string'&&w.startsWith('【原图复核】'));
   $('review-notices').replaceChildren(...review.map(w=>{const box=node('div',null,'notice');box.append(node('strong','原图复核提示 · 独立 GPT 抽查'),node('p',w.replace(/^【原图复核】GPT 对照原件的抽查提示，非 DeepSeek 自动结论：/,'')));return box;}));
   const pending=profile?(profile.uncertainties||[]):[];listDetails('uncertainties','uncertainty-title','uncertainty-list',pending,'零件信息与适用条件待确认');
-  const applicability=isSpec?[]:(drawing.dispositions||[]).filter(d=>d.status==='needs_confirmation').map(d=>{const rule=spec.rules.find(r=>r.id===d.ruleId);return d.ruleId+(rule?' '+rule.category:'')+'：'+d.reason;});listDetails('applicability','applicability-title','applicability-list',applicability,'规范适用性待确认');
+  const applicability=isSpec?[]:pendingApplicability(spec,drawing);listDetails('applicability','applicability-title','applicability-list',applicability,'规范适用性待复核');
   listDetails('warnings','warning-title','warning-list',warnings.filter(w=>!review.includes(w)),'解析与复核记录');
   $('context-control').hidden=!isSpec||scoped(spec)||!rows.some(background);$('usage-filter').hidden=!isSpec||!scoped(spec);$('category-filter').hidden=isSpec||!scoped(drawing);$('conflict-filter').hidden=isSpec||!scoped(drawing);categoryOptions(isSpec?[]:rows);renderTable();
 }
@@ -209,12 +215,12 @@ function renderTable(){
   visibleRows=eligible.filter(r=>(mode==='spec'||!scoped(drawing)||(!$('category-filter').value||r.processCategory===$('category-filter').value)&&(!$('conflict-filter').value||conflictKind(r)===$('conflict-filter').value))&&(!$('pending-only').checked||isPending(r))&&(!query||[r.category,r.requirement,r.processCategory,r.scope,r.review_note,simple(r.conflict),simple(r.sources),simple(r.conditions),r.id].join(' ').toLocaleLowerCase().includes(query)));
   $('table-count').textContent='显示 '+visibleRows.length+' / '+eligible.length+' 项'+($('pending-only').checked?' · 待复核项':'');
   const fragment=document.createDocumentFragment();
-  for(const row of visibleRows){const tr=node('tr');const name=node('td');name.append(node('span',row.id,'row-id'),node('span',row.category));if(row.processCategory)name.append(node('br'),node('span',row.processCategory,'process-chip'));if(row.usage)name.append(node('br'),node('span',row.usage==='inspection'?'检验候选':'仅用于对照','source-kind'));if(isPending(row))name.append(node('br'),node('span','待复核','pending'));if(background(row))name.append(node('br'),node('span','背景说明','pending'));const metric=node('td');if(conflictKind(row))metric.append(node('strong','图纸执行要求'));metric.append(node('div',row.requirement,'req-text'));
+  for(const row of visibleRows){const tr=node('tr');const name=node('td');name.append(node('span',row.id,'row-id'),node('span',row.category));if(row.usage)name.append(node('br'),node('span',row.usage==='inspection'?'检验候选':'仅用于对照','source-kind'));if(isPending(row))name.append(node('br'),node('span','待复核','pending'));if(background(row))name.append(node('br'),node('span','背景说明','pending'));const metric=node('td');if(conflictKind(row))metric.append(node('strong','图纸执行要求'));metric.append(node('div',row.requirement,'req-text'));
     if(conflictKind(row)){const kind=conflictKind(row);tr.className=kind==='conflict'?'has-conflict':'has-override';name.append(node('br'),node('span',kind==='conflict'?'要求冲突':'图纸覆盖','conflict-chip '+kind));const box=node('div',null,'conflict-box '+kind);box.append(node('strong',kind==='conflict'?'要求冲突 · 以图纸为准，需核对':'图纸覆盖通用要求'),node('p','规范要求：'+row.conflict.specificationRequirement),node('p',row.conflict.reason));metric.append(box);}
     const sources=row.sources||[];const details=node('details',null,'evidence');details.append(node('summary','来源与适用条件'+(sources.length?' · '+sources.length+' 处':'')));const body=node('div',null,'evidence-content');
     for(const [label,value] of [['适用范围',row.scope],['适用条件',row.conditions],['例外',row.exceptions],['复核说明',row.review_note],['关联规范规则',row.ruleIds],['覆盖关系',row.overridePolicy],['外部引用',row.externalReferences]])if(simple(value))body.append(node('p',label+'：'+simple(value)));
     for(const source of sources){body.append(node('p',source.file+' · 物理页 '+source.page+(source.section?' · '+source.section:''),'source-label'));if(source.quote)body.append(node('blockquote',source.quote));}
-    if(!body.childNodes.length)body.append(node('p','此条未附其他说明。'));details.append(body);metric.append(details);tr.append(name,metric);fragment.append(tr);
+    if(!body.childNodes.length)body.append(node('p','此条未附其他说明。'));details.append(body);metric.append(details);tr.append(name,metric,node('td',processStage(row),'stage-cell'));fragment.append(tr);
   }
   $('requirements').replaceChildren(fragment);$('empty').hidden=visibleRows.length>0;$('export-csv').disabled=visibleRows.length===0;
 }
@@ -222,7 +228,8 @@ $('tab-drawing').addEventListener('click',()=>{mode='drawing';clearFilters();ren
 $('search').addEventListener('input',renderTable);$('pending-only').addEventListener('change',renderTable);$('include-context').addEventListener('change',renderTable);
 for(const id of ['category-filter','conflict-filter','usage-filter'])$(id).addEventListener('change',renderTable);
 function csvCell(value){let s=String(value??'');if(/^\s*[=+\-@\t\r]/.test(s))s="'"+s;return '"'+s.replace(/"/g,'""')+'"';}
-$('export-csv').addEventListener('click',()=>{const lines=[['工艺要求的名称','量化指标'],...visibleRows.map(r=>[r.category,r.requirement])].map(row=>row.map(csvCell).join(','));download(currentName()+'-工艺要求.csv','\ufeff'+lines.join('\r\n'),'text/csv;charset=utf-8');});
+function csvContent(rows){return '\ufeff'+[['工艺要求的名称','量化指标','阶段'],...rows.map(r=>[r.category,r.requirement,processStage(r)])].map(row=>row.map(csvCell).join(',')).join('\r\n');}
+$('export-csv').addEventListener('click',()=>download(currentName()+'-工艺要求.csv',csvContent(visibleRows),'text/csv;charset=utf-8'));
 $('export-json').addEventListener('click',()=>{const value=mode==='spec'?{...spec,drawings:undefined}:{specification:{id:spec.id,metadata:spec.metadata,sourceSha256:spec.sourceSha256},...drawing};download(currentName()+'-完整结果.json',JSON.stringify(value,null,2),'application/json;charset=utf-8');});
 $('export-all').addEventListener('click',()=>download('全部规范与图纸-静态快照.json',JSON.stringify(report,null,2),'application/json;charset=utf-8'));
 $('print').addEventListener('click',()=>window.print());

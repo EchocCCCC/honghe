@@ -106,7 +106,7 @@ test('drawing read, norm match and audit receive clean source JSON while saved b
       return { result: output, metadata: { model: 'deepseek-flash' } };
     } });
   assert.deepEqual(modes, ['read', 'match', 'audit']);
-  assert.equal(result.run.pipelineVersion, 'two-stage-v21-clean-input');
+  assert.equal(result.run.pipelineVersion, 'two-stage-v22-row-review');
   assert.equal(result.requirements[0].sources[0].verification, 'text_match');
   const saved = JSON.parse(await fs.readFile(path.join(directory, 'drawing/drawing-read.json'), 'utf8'));
   assert.equal(saved.requirements[0].sources[0].verification, 'text_match');

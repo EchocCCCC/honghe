@@ -5,7 +5,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ACTIONABLE_TYPES, informationSummary, readInformationView, decorateDispositions, usesDrawingScope, inheritableRules, ruleUsageSummary } from './information-types.js';
 import { RUNTIME, config, MODEL_ID, safeError } from './config.js';
-import { buildSpecification, matchDrawing, specificationFingerprint, SPEC_SKILL, digest } from './two-stage-pipeline.js';
+import { buildSpecification, matchDrawing, specificationFingerprint, SPEC_SKILL, digest, reviewRuleCoverage } from './two-stage-pipeline.js';
 import { loadSkillBundle, freezeSkillBundle } from './skills.js';
 
 const terminal = new Set(['completed', 'failed', 'partial']);
@@ -89,8 +89,9 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
     const specification = await readInformationView(root, spec?.result);
     return { ...job, ...(specification ? { specification: { ...job.specification, informationSummary: specification.informationSummary, ruleCount: usesDrawingScope(specification) ? inheritableRules(specification).length : specification.informationSummary.actionable, recordCount: specification.informationSummary.total, ...(usesDrawingScope(specification) ? { scopePolicy: specification.scopePolicy, ...ruleUsageSummary(specification.rules) } : {}) } } : {}), drawings: await Promise.all(job.drawings.map(async ({ file, ...drawing }) => {
       if (!drawing.result) return drawing;
-      const result = decorateDispositions(await readInformationView(root, drawing.result), specification);
-      return { ...drawing, result, ...(drawing.status === 'completed' ? { message: usesDrawingScope(result) ? `完成：${result.requirements.length}项图纸要求与规范检验要求` : `完成：制造与检验${result.informationSummary.core}项；采购交付${result.informationSummary.procurement}项；背景说明${result.informationSummary.context}项` } : {}) };
+      let result = decorateDispositions(await readInformationView(root, drawing.result), specification);
+      if (['partial', 'needs_review'].includes(result.review?.status)) result = { ...result, ruleCoverage: reviewRuleCoverage(result, specification) };
+      return { ...drawing, result, ...(drawing.status === 'completed' ? { message: drawingResultMessage(result) } : {}) };
     })) };
   }
   function batchSummary(job) {
@@ -98,10 +99,15 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
       const requirements = drawing.result?.requirements;
       const hasResult = drawing.status === 'completed' && Array.isArray(requirements) && requirements.length > 0;
       return { id: drawing.id, name: drawing.name, status: drawing.status, sourceSha256: drawing.sourceSha256 || '', hasResult,
+        reviewStatus: drawing.result?.review?.status || '', reviewRequiredCount: hasResult ? requirements.filter(row => row.review_required).length : 0,
         partNumber: drawing.result?.drawing?.partNumber || '', partName: drawing.result?.drawing?.name || '', requirementCount: hasResult ? requirements.length : 0 };
     });
     return { id: job.id, specificationId: job.specificationId, stage: job.stage, status: job.status, createdAt: job.createdAt, updatedAt: job.updatedAt,
       drawingCount: drawings.length, completedCount: drawings.filter(drawing => drawing.hasResult).length, drawings };
+  }
+  function drawingResultMessage(result) {
+    const label = result.review?.status === 'partial' ? '部分提取，待复核' : result.review?.status === 'needs_review' ? '已提取，待复核' : '已提取清单';
+    return `${label}：${result.requirements.length}项要求`;
   }
   function requireService(req, res, next) {
     if (!configured()) return res.status(503).json({ error: '请在本地 .env 配置 DEEPSEEK_API_KEY 并重启' });
@@ -137,7 +143,7 @@ export function createTwoStageRouter({ root = RUNTIME, build = buildSpecificatio
         const specificationView = await readInformationView(root, spec.result);
         drawing.result = await match({ file: drawing.file, directory: runDirectory, specificationJob: { ...spec, result: specificationView }, specificationDirectory: directory('specifications', spec.id), stage: job.stage,
           initialRun, retryId: options.retryId || '', onProgress: (status, message) => { drawing.status = status; drawing.message = message; job.message = `${job.drawings.filter(d => d.status === 'completed').length}/${job.drawings.length}个零件完成；${drawing.name}：${message}`; } });
-        drawing.status = 'completed'; drawing.message = `完成：${drawing.result.requirements.length}条要求`; delete drawing.error;
+        drawing.status = 'completed'; drawing.message = drawingResultMessage(drawing.result); delete drawing.error;
       } catch (error) { drawing.status = 'failed'; drawing.error = safeError(error); drawing.message = '本零件处理失败；其他零件继续'; }
       const completed = job.drawings.filter(d => d.status === 'completed').length, failed = job.drawings.filter(d => d.status === 'failed').length;
       if (completed + failed === job.drawings.length) job.status = failed === 0 ? 'completed' : completed === 0 ? 'failed' : 'partial';

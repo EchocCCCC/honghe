@@ -37,7 +37,7 @@ const delta = () => ({
   bindings: [], dispositions: [{ ruleId: 'R001', status: 'applicable', reason: '本件适用', evidence: [evidence('spec.pdf')] }], warnings: [],
 });
 
-test('ordinary API retry isolates a fresh attempt after the bounded rematch still changes conditions', async t => {
+test('ordinary API retry preserves a reviewable first result when bounded rematching still changes conditions', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'honghe-retry-attempt-'));
   const specId = '11111111-1111-4111-8111-111111111111';
   const specDirectory = path.join(root, 'specifications', specId);
@@ -125,19 +125,26 @@ test('ordinary API retry isolates a fresh attempt after the bounded rematch stil
   const created = await post('/drawing-batches', form);
   assert.equal(created.status, 202);
   const endpoint = '/drawing-batches/' + created.body.id;
-  const failed = await wait(endpoint, result => result.status === 'failed');
+  const failed = await wait(endpoint, result => result.status === 'completed');
   const drawingId = failed.drawings[0].id;
   const firstDirectory = path.join(root, 'drawing-batches', failed.id, drawingId);
-  assert.match(failed.drawings[0].error, /重新匹配/);
-  assert.equal(failed.drawings[0].result, undefined);
+  assert.equal(failed.drawings[0].error, undefined);
+  assert.equal(failed.drawings[0].result.review.status, 'needs_review');
+  assert.match(failed.drawings[0].message, /待复核/);
+  assert.equal(failed.drawings[0].result.ruleCoverage.decided, 0);
+  assert.equal(failed.drawings[0].result.ruleCoverage.pending, 1);
+  assert.equal(failed.drawings[0].result.drawing.material, 'P');
+  const summary = await get('/drawing-batches?specificationId=' + specId);
+  assert.equal(summary.batches[0].drawings[0].reviewStatus, 'needs_review');
+  assert.equal(summary.batches[0].drawings[0].reviewRequiredCount, 2);
   assert.equal(JSON.stringify(failed).includes(root), false);
   assert.equal(JSON.parse(await fs.readFile(path.join(firstDirectory, 'audited-result.json'), 'utf8')).drawing.material, 'N');
   assert.equal(JSON.parse(await fs.readFile(path.join(firstDirectory, 'rematch-1/audited-result.json'), 'utf8')).drawing.material, 'P');
   assert.match(JSON.parse(await fs.readFile(path.join(firstDirectory, 'rematch-1/rematch-required.json'), 'utf8')).reason, /重新匹配/);
   assert.match(JSON.parse(await fs.readFile(path.join(firstDirectory, 'rematch-required.json'), 'utf8')).reason, /重新匹配/);
-  await assert.rejects(fs.access(path.join(firstDirectory, 'result.json')));
+  await fs.access(path.join(firstDirectory, 'result.json'));
   const historyPaths = [
-    'prepared.json', 'prepared/source-input.txt', 'prepared/ocr-candidates.txt',
+    'result.json', 'prepared.json', 'prepared/source-input.txt', 'prepared/ocr-candidates.txt',
     'drawing-read-input.txt', 'drawing-read.json', 'matching-conditions.json', 'matching-input.txt',
     'norm-match-delta.json', 'matched-result.json', 'review-input.txt', 'audited-result.json', 'rematch-required.json',
     'reading/model-result.json', 'reading/run-metadata.json', 'matching/model-result.json', 'matching/run-metadata.json',
@@ -172,5 +179,5 @@ test('ordinary API retry isolates a fresh attempt after the bounded rematch stil
   assert.deepEqual(prepareDirectories, [path.join(firstDirectory, 'prepared'), path.join(nextDirectory, 'prepared')]);
   for (const [relative, content] of originalArtifacts) assert.deepEqual(await fs.readFile(path.join(firstDirectory, relative)), content, relative + ' must remain unchanged');
   assert.deepEqual(await fs.readFile(path.join(firstDirectory, 'source.pdf')), partBytes);
-  await assert.rejects(fs.access(path.join(firstDirectory, 'result.json')));
+  await fs.access(path.join(firstDirectory, 'result.json'));
 });

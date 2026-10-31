@@ -66,6 +66,7 @@ test('saved batches can be discovered by exact specification ID after a server r
     assert.equal(response.body.batches[0].completedCount, 2);
     assert.deepEqual(response.body.batches[0].drawings[0], {
       id: '530', name: '530.pdf', status: 'completed', sourceSha256: 'a'.repeat(64), hasResult: true,
+      reviewStatus: '', reviewRequiredCount: 0,
       partNumber: 'PART-530', partName: '零件530', requirementCount: 1,
     });
     const serialized = JSON.stringify(response.body);
@@ -78,6 +79,26 @@ test('saved batches can be discovered by exact specification ID after a server r
     assert.equal(empty.status, 200); assert.deepEqual(empty.body, { batches: [] });
     await new Promise(resolve => api.server.close(resolve));
   }
+});
+
+test('saved drawing summaries distinguish reviewable and partial extraction while keeping both lists viewable', async t => {
+  const { save, start } = await fixture(t), spec = randomUUID();
+  await save('specifications', specification(spec));
+  const reviewed = drawing('review');
+  reviewed.result.review = { status: 'needs_review', pendingRuleIds: ['R001'] };
+  reviewed.result.requirements[0].review_required = true;
+  reviewed.result.requirements.push({ category: '独立要求', requirement: 'still-clear', review_required: false });
+  const partial = drawing('partial');
+  partial.result.review = { status: 'partial', incompleteStage: '规范匹配', pendingRuleIds: ['R001'] };
+  const failed = drawing('failed', 'failed', false);
+  await save('drawing-batches', batch(randomUUID(), spec, [reviewed, partial, failed], { status: 'partial' }));
+  const api = await start(), response = await api.get(`/drawing-batches?specificationId=${spec}`);
+  const summaries = response.body.batches[0].drawings;
+  assert.equal(response.body.batches[0].completedCount, 2);
+  assert.deepEqual(summaries.map(item => [item.id, item.hasResult, item.reviewStatus, item.reviewRequiredCount, item.requirementCount]),
+    [['review', true, 'needs_review', 1, 2], ['partial', true, 'partial', 0, 1], ['failed', false, '', 0, 0]]);
+  assert.equal(JSON.stringify(response.body).includes('still-clear'), false);
+  assert.equal(JSON.stringify(response.body).includes('private-prompt'), false);
 });
 
 test('list validation rejects missing or invalid IDs and distinguishes a missing specification from an empty library', async t => {

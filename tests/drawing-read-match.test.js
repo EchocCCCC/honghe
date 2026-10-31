@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validateDrawingRead, applyNormMatchDelta } from '../server/two-stage-schema.js';
-import { drawingMatchingInput, assertMatchingConditionsUnchanged, rebaselineDrawingRead } from '../server/two-stage-pipeline.js';
+import { drawingMatchingInput, assertMatchingConditionsUnchanged, rebaselineDrawingRead, retainDrawingCandidate, reviewRuleCoverage } from '../server/two-stage-pipeline.js';
 import { SCOPE_POLICY } from '../server/information-types.js';
 
 function boundAuditFixture() {
@@ -246,6 +246,86 @@ const withRawStock = read => {
   );
   return read;
 };
+
+test('retained mixed wording changes keep the complete list and only flag affected rows and linked rules', () => {
+  const { read, matched, audited } = boundAuditFixture();
+  const item = fixture();
+  audited.requirements.find(row => row.id === 'D-008').requirement = '图示表面：10%PT；规范补充方法按MOCK-METHOD执行';
+  const snapshots = [clone(read), clone(matched), clone(audited)];
+  const result = retainDrawingCandidate({ read: deepFreeze(read), matched: deepFreeze(matched), audited: deepFreeze(audited),
+    specification: item.specification, drawingPrepared, specPrepared, reason: '复核修改措辞，相关条目待确认。' });
+  assert.equal(result.review.status, 'needs_review');
+  assert.equal(result.requirements.length, audited.requirements.length);
+  assert.equal(result.requirements.find(row => row.id === 'D-008').requirement, audited.requirements.find(row => row.id === 'D-008').requirement);
+  assert.equal(result.requirements.find(row => row.id === 'D-008').review_required, true);
+  assert.equal(result.requirements.find(row => row.id === 'ADD-001').review_required, true);
+  assert.equal(result.requirements.find(row => row.id === 'D-003').review_required, false);
+  assert.deepEqual(result.review.pendingRuleIds, ['R-I1']);
+  assert.equal(result.ruleCoverage.decided, 1);
+  assert.equal(result.ruleCoverage.notApplicable, 1);
+  assert.equal(result.ruleCoverage.pending, 1);
+  assert.deepEqual([read, matched, audited], snapshots);
+});
+
+test('changed D bindings propagate both previous and new rule associations', () => {
+  const { read, matched, audited } = boundAuditFixture(), item = fixture();
+  const changed = audited.requirements.find(row => row.id === 'D-008');
+  changed.scope = '另一个图示受检区域';
+  changed.ruleIds = ['R-I2'];
+  audited.dispositions.find(row => row.ruleId === 'R-I2').status = 'needs_confirmation';
+  const result = retainDrawingCandidate({ read, matched, audited, specification: item.specification, drawingPrepared, specPrepared });
+  assert.deepEqual(new Set(result.review.pendingRuleIds), new Set(['R-I1', 'R-I2']));
+  assert.equal(result.requirements.find(row => row.id === 'ADD-001').review_required, true);
+  assert.equal(result.requirements.find(row => row.id === 'D-008').scope, '另一个图示受检区域');
+  assert.equal(result.ruleCoverage.decided, 0);
+});
+
+test('a changed matching profile also makes previously not-applicable rules pending without falsifying their model decision', () => {
+  const item = fixture(); item.read = validateDrawingRead(item.read, drawingPrepared);
+  const matched = merge(item), audited = clone(matched); audited.drawing.material = '另一个材料';
+  const result = retainDrawingCandidate({ ...item, matched, audited, drawingPrepared, specPrepared });
+  assert.deepEqual(new Set(result.review.pendingRuleIds), new Set(['R-I1', 'R-I2']));
+  assert.equal(result.dispositions.find(row => row.ruleId === 'R-I2').status, 'not_applicable');
+  assert.equal(result.ruleCoverage.notApplicable, 0);
+  assert.equal(result.ruleCoverage.modelDecided, 2);
+  assert.equal(result.ruleCoverage.decided, 0);
+  assert.equal(result.requirements.find(row => row.id === 'D-004').review_required, false);
+  assert.equal(reviewRuleCoverage({ ...result, ruleCoverage: { decided: 2 } }, item.specification).decided, 0);
+});
+
+test('ordinary corrected geometry only flags its own row rather than all normative inspection', () => {
+  const item = fixture(); item.read = validateDrawingRead(item.read, drawingPrepared);
+  const matched = merge(item), audited = clone(matched); audited.requirements.find(row => row.id === 'D-004').requirement = '成品总高121';
+  const result = retainDrawingCandidate({ ...item, matched, audited, drawingPrepared, specPrepared });
+  assert.deepEqual(result.review.affectedRequirementIds, ['D-004']);
+  assert.deepEqual(result.review.pendingRuleIds, []);
+  assert.equal(result.requirements.find(row => row.id === 'ADD-001').review_required, false);
+});
+
+test('partial norm failure retains only strict drawing contents and reports missing normative decisions', () => {
+  const item = fixture(), before = clone(item.read);
+  const result = retainDrawingCandidate({ read: item.read, specification: item.specification, drawingPrepared, specPrepared,
+    partialStage: '规范匹配', reason: '失败 C:/private/key.txt\nsk-abcdefghijklmnop' });
+  assert.equal(result.review.status, 'partial');
+  assert.equal(result.requirements.length, item.read.requirements.length);
+  assert.ok(result.requirements.every(row => row.origin === 'drawing' && !row.ruleIds.length));
+  assert.deepEqual(result.dispositions, []);
+  assert.equal(result.ruleCoverage.total, 2);
+  assert.equal(result.ruleCoverage.decided, 0);
+  assert.equal(result.ruleCoverage.pending, 2);
+  assert.doesNotMatch(JSON.stringify(result.review), /C:\/private|sk-abcdefghijklmnop/);
+  assert.deepEqual(item.read, before);
+});
+
+test('retaining saved candidates never accepts invalid pages, foreign sources or unknown rules', () => {
+  for (const alter of [value => { value.requirements[0].sources[0].page = 2; },
+    value => { value.requirements[0].sources[0].file = 'foreign.pdf'; },
+    value => { value.requirements.find(row => row.id === 'ADD-001').ruleIds = ['UNKNOWN']; }]) {
+    const item = fixture(); item.read = validateDrawingRead(item.read, drawingPrepared);
+    const matched = merge(item), audited = clone(matched); alter(audited);
+    assert.throws(() => retainDrawingCandidate({ ...item, matched, audited, drawingPrepared, specPrepared }));
+  }
+});
 
 test('drawing read accepts only drawing facts and leaves the raw object unchanged', () => {
   const { read } = fixture(), before = clone(read);

@@ -276,10 +276,60 @@ test('drawing reading, image-free norm delta and original audit remain isolated 
     assert.equal(JSON.parse(await fs.readFile(path.join(successDir, 'result.json'), 'utf8')).ruleCoverage.decided, 1);
     const failedDir = path.join(root, 'rejected');
     let badCalls = 0; const badPatch = currentPatch(); badPatch.replacements = invalid.requirements;
-    await assert.rejects(matchDrawing({ file: { name: 'part.pdf' }, directory: failedDir, specificationJob: job, specificationDirectory: root, prepare: async () => structuredClone(prepared),
-      invoke: async options => { badCalls++; return { result: options.skillProvenance.mode === 'read' ? currentRead() : options.skillProvenance.mode === 'match' ? currentDelta() : badPatch, metadata: {} }; } }), /本零件证据/);
+    const partial = await matchDrawing({ file: { name: 'part.pdf' }, directory: failedDir, specificationJob: job, specificationDirectory: root, prepare: async () => structuredClone(prepared),
+      invoke: async options => { badCalls++; return { result: options.skillProvenance.mode === 'read' ? currentRead() : options.skillProvenance.mode === 'match' ? currentDelta() : badPatch, metadata: {} }; } });
     assert.equal(badCalls, 4);
-    await assert.rejects(fs.access(path.join(failedDir, 'result.json')));
+    assert.equal(partial.review.status, 'partial');
+    assert.equal(partial.review.incompleteStage, '原图复核');
+    assert.equal(partial.requirements.find(row => row.id === invalid.requirements[0].id).origin, 'specification');
+    assert.equal(partial.ruleCoverage.decided, 0);
+    assert.equal(partial.ruleCoverage.pending, 1);
+    await fs.access(path.join(failedDir, 'result.json'));
+    const normFailureModes = [], invalidDelta = currentDelta();
+    invalidDelta.additions[0].ruleIds = ['UNKNOWN-RULE'];
+    const normPartial = await matchDrawing({ file: { name: 'part.pdf' }, directory: path.join(root, 'norm-incomplete'), specificationJob: job, specificationDirectory: root,
+      prepare: async () => structuredClone(prepared), invoke: async options => {
+        normFailureModes.push(options.skillProvenance.mode);
+        return { result: options.skillProvenance.mode === 'read' ? currentRead() : invalidDelta, metadata: {} };
+      } });
+    assert.deepEqual(normFailureModes, ['read', 'match', 'match']);
+    assert.equal(normPartial.review.status, 'partial');
+    assert.equal(normPartial.review.incompleteStage, '规范匹配');
+    assert.equal(normPartial.run.matching, null);
+    assert.deepEqual(normPartial.dispositions, []);
+    assert.equal(normPartial.ruleCoverage.pending, 1);
+    assert.equal(normPartial.ruleCoverage.decided, 0);
+    assert.equal(normPartial.requirements.length, 1);
+    assert.equal(normPartial.requirements[0].requirement, '15 mm');
+    assert.equal(normPartial.requirements[0].origin, 'drawing');
+    const unreadable = currentRead(); unreadable.requirements[0].sources = [evidence('foreign.pdf')];
+    const readFailureModes = [], unreadableDir = path.join(root, 'no-valid-read');
+    await assert.rejects(matchDrawing({ file: { name: 'part.pdf' }, directory: unreadableDir, specificationJob: job, specificationDirectory: root,
+      prepare: async () => structuredClone(prepared), invoke: async options => {
+        readFailureModes.push(options.skillProvenance.mode); return { result: unreadable, metadata: {} };
+      } }), /来源/);
+    assert.deepEqual(readFailureModes, ['read', 'read']);
+    await assert.rejects(fs.access(path.join(unreadableDir, 'result.json')));
+    const mixedRead = currentRead();
+    mixedRead.requirements[0] = { ...mixedRead.requirements[0], processCategory: '检验', category: '图纸试验', requirement: '图纸试验旧说明' };
+    const mixedDelta = currentDelta();
+    mixedDelta.bindings.push({ id: 'DRAW-001', ruleIds: ['R001'], sources: [evidence('spec.pdf')], conflict: null, review_required: false, review_note: '' });
+    const mixedPatch = currentPatch();
+    mixedPatch.replacements = [{ ...mixedRead.requirements[0], requirement: '图纸试验新说明', origin: 'combined', ruleIds: ['R001'], sources: [evidence('part.pdf'), evidence('spec.pdf')] }];
+    const mixedModes = [], mixedDir = path.join(root, 'mixed-review');
+    const mixedResult = await matchDrawing({ file: { name: 'part.pdf' }, directory: mixedDir, specificationJob: job, specificationDirectory: root,
+      prepare: async () => structuredClone(prepared), invoke: async options => {
+        const mode = options.skillProvenance.mode; mixedModes.push(mode);
+        return { result: mode === 'read' ? mixedRead : mode === 'match' ? mixedDelta : mixedPatch, metadata: {} };
+      } });
+    assert.deepEqual(mixedModes, ['read', 'match', 'audit']);
+    assert.equal(mixedResult.review.status, 'needs_review');
+    assert.equal(mixedResult.requirements.find(row => row.id === 'DRAW-001').requirement, '图纸试验新说明');
+    assert.equal(mixedResult.requirements.find(row => row.id === 'DRAW-001').review_required, true);
+    assert.equal(mixedResult.ruleCoverage.decided, 0);
+    await fs.access(path.join(mixedDir, 'rematch-rejected.json'));
+    assert.equal(JSON.parse(await fs.readFile(path.join(mixedDir, 'drawing-read.json'), 'utf8')).requirements[0].requirement, '图纸试验旧说明');
+    assert.equal(JSON.parse(await fs.readFile(path.join(mixedDir, 'audited-result.json'), 'utf8')).requirements[0].requirement, '图纸试验新说明');
     const matchingSkill = compileSkill(await loadSkillBundle(DRAWING_SKILL), 'match');
     let retries = 0;
     const retry = await matchDrawing({ file: { name: 'part.pdf' }, directory: path.join(root, 'retry'), specificationJob: job, specificationDirectory: root, prepare: async () => structuredClone(prepared),

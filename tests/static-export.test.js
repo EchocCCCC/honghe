@@ -132,8 +132,64 @@ test('explicit status export retains latest failed and pending cards, never stal
     const context = vm.createContext({}); vm.runInContext(script.slice(start, end) + '\nthis.isPublished=published;this.label=statusLabel;', context);
     assert.equal(context.isPublished(drawings[0]), false); assert.equal(context.label(drawings[0]), '处理失败');
     assert.equal(context.label(drawings[1]), '识读图纸');
-    assert.match(context.snapshotStatusText(drawings), /本轮 2 张图纸 · 0 张已发布正式结果 · 1 张失败 · 1 张待完成/);
-    assert.match(html, /本次无正式结果/); assert.match(html, /批次建立/); assert.match(html, /本轮更新/);
+    assert.match(context.snapshotStatusText(drawings), /本轮 2 张图纸 · 0 张已有清单（0 张待复核） · 1 张失败 · 1 张待完成/);
+    assert.match(html, /本次无有效清单/); assert.match(html, /批次建立/); assert.match(html, /本轮更新/);
+  } finally { await f.close(); }
+});
+
+test('row-review and partial API results are exported as visible current lists with minimal review provenance', async () => {
+  const f = await fixture();
+  try {
+    const first = f.batches[bid2].drawings[0], second = f.batches[bid2].drawings[1];
+    first.result.review = { status: 'needs_review', note: '匹配前提变化，关联规范待复核。', pendingRuleIds: ['R1'], affectedRequirementIds: ['new'], rawPath: 'PRIVATE_REVIEW_PATH' };
+    first.result.run.processingMode = 'reprocess_existing';
+    first.result.dispositions = [{ ruleId: 'R1', status: 'not_applicable', reason: '原模型材料条件不适用', evidence: [] }];
+    second.result.review = { status: 'partial', note: '复核未完成，已保留合法提取内容。C:/private/audit.txt\nsk-abcdefghijklmnopqrstuv', pendingRuleIds: ['R2'] };
+    const before = structuredClone(f.batches);
+    await f.run();
+    const html = await fs.readFile(f.output, 'utf8'), data = JSON.parse(html.match(/<script id="report-data" type="application\/json">([\s\S]*?)<\/script>/)[1]);
+    const drawings = data.specifications[0].drawings;
+    assert.deepEqual(drawings.map(d => [d.published, d.requirements.length, d.review.status]), [[true, 1, 'needs_review'], [true, 1, 'partial']]);
+    assert.deepEqual(drawings[0].review.pendingRuleIds, ['R1']); assert.deepEqual(drawings[0].review.affectedRequirementIds, ['new']);
+    assert.equal(drawings[0].processingMode, 'reprocess_existing');
+    assert.equal(drawings[0].dispositions[0].status, 'not_applicable');
+    for (const secret of ['PRIVATE_REVIEW_PATH', 'C:/private', 'sk-abcdefghijklmnopqrstuv']) assert.ok(!html.includes(secret), secret);
+    const script = html.match(/<script>([\s\S]*?)<\/script>/)[1], start = script.indexOf('const published='), end = script.indexOf('function categoryOptions');
+    const context = vm.createContext({}); vm.runInContext(script.slice(start, end) + '\nthis.label=statusLabel;this.pending=pendingApplicability;this.counts=snapshotStatusText;', context);
+    assert.equal(context.label(drawings[0]), '已提取 · 待复核'); assert.equal(context.label(drawings[1]), '部分提取 · 待复核');
+    assert.match(context.pending(data.specifications[0], drawings[0])[0], /待复核（原模型：不适用）/);
+    assert.match(context.pending(data.specifications[0], drawings[1])[0], /待复核（尚未匹配）/);
+    assert.match(context.counts(drawings), /2 张已有清单（2 张待复核） · 0 张失败/);
+    assert.deepEqual(f.batches, before);
+  } finally { await f.close(); }
+});
+
+test('static renderer and CSV move the process category from the name cell to the third stage column', async () => {
+  const f = await fixture();
+  try {
+    f.batches[bid2].drawings[0].result.requirements = [requirement('R1', { category: '甲', processCategory: '焊接', stage: '批产' }), requirement('R2', { category: '乙', processCategory: '检验' })];
+    await f.run();
+    const html = await fs.readFile(f.output, 'utf8'), script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+    const data = JSON.parse(html.match(/<script id="report-data" type="application\/json">([\s\S]*?)<\/script>/)[1]);
+    const nodes = new Map();
+    const node = tag => ({ tag, children: [], textContent: '', value: '', checked: false, style: {},
+      get childNodes() { return this.children; }, append(...children) { this.children.push(...children); },
+      replaceChildren(...children) { this.children = children.flatMap(child => child.tag === 'fragment' ? child.children : child); } });
+    const get = id => { if (!nodes.has(id)) nodes.set(id, node('div')); return nodes.get(id); };
+    const context = vm.createContext({ document: { createElement: node, createDocumentFragment: () => node('fragment') }, $: get,
+      mode: 'drawing', spec: data.specifications[0], drawing: data.specifications[0].drawings[0], visibleRows: [] });
+    get('search').value = '焊接';
+    const helpers = script.slice(script.indexOf('const simple='), script.indexOf('const published='));
+    const renderer = script.slice(script.indexOf('function renderTable(){'), script.indexOf("$('tab-drawing').addEventListener"));
+    const csv = script.slice(script.indexOf('function csvCell('), script.indexOf("$('export-csv').addEventListener"));
+    vm.runInContext(helpers + '\n' + renderer + '\n' + csv + '\nrenderTable();this.csv=csvContent;', context);
+    const rendered = get('requirements').children;
+    assert.equal(rendered.length, 1); assert.equal(rendered[0].children.length, 3);
+    assert.equal(rendered[0].children[2].textContent, '焊接');
+    assert.ok(!rendered[0].children[0].children.some(child => child.className === 'process-chip'));
+    const text = context.csv([{ category: '甲', requirement: '不得补焊', processCategory: '焊接', stage: '样件' }, { category: '=公式', requirement: '值', processCategory: undefined }]);
+    assert.equal(text, '\ufeff"工艺要求的名称","量化指标","阶段"\r\n"甲","不得补焊","焊接"\r\n"\'=公式","值","待分类"');
+    assert.match(html, /<th scope="col">阶段<\/th>/);
   } finally { await f.close(); }
 });
 
