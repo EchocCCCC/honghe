@@ -148,7 +148,7 @@ th:first-child{width:26%}th:last-child{width:14%}.stage-cell{font-weight:500;col
         <div id="review-notices"></div>
         <details class="aux" id="uncertainties" hidden><summary id="uncertainty-title"></summary><ul id="uncertainty-list"></ul></details>
         <details class="aux" id="applicability" hidden><summary id="applicability-title"></summary><ul id="applicability-list"></ul></details>
-        <details class="aux" id="warnings" hidden><summary id="warning-title"></summary><ul id="warning-list"></ul></details>
+        <details class="aux" id="warnings" hidden><summary id="warning-title"></summary><p class="note"><strong>原始提取记录（未经确认）</strong></p><p class="note">以下为模型提取说明和程序提示，不代表已经确认正确；原图核对结论见单独提示，具体问题以要求行标注为准。R 编号仅用于本次关联规范的内部定位，跨版本含义可能变化，请以原文条款为准。</p><ul id="warning-list"></ul></details>
         <div class="toolbar"><label class="search"><span class="sr-only">搜索要求名称、指标或来源</span><input type="search" id="search" placeholder="搜索要求名称、指标或来源…" autocomplete="off"></label><select class="category-select" id="category-filter" aria-label="按工艺类别筛选"></select><select class="category-select" id="conflict-filter" aria-label="按冲突或覆盖筛选"><option value="">全部状态</option><option value="conflict">要求冲突</option><option value="drawing_override">图纸覆盖</option></select><select class="category-select" id="usage-filter" aria-label="按规范用途筛选" hidden><option value="inspection">用于补充的检验要求</option><option value="comparison">仅用于冲突对照</option><option value="all">全部规范依据</option></select><label class="check"><input type="checkbox" id="pending-only">仅看待复核项</label><label class="check" id="context-control" hidden><input type="checkbox" id="include-context">包含背景说明</label><div class="export-group"><button type="button" id="export-csv">导出当前三列 CSV</button><button type="button" id="export-json">导出当前 JSON</button><button type="button" id="print">打印当前结果</button></div></div>
         <div class="table-caption"><span id="table-count" aria-live="polite"></span><span>展开指标下方可查看来源和适用条件</span></div>
         <div class="table-wrap"><table aria-label="工艺要求"><thead><tr><th scope="col">工艺要求的名称</th><th scope="col">量化指标</th><th scope="col">阶段</th></tr></thead><tbody id="requirements"></tbody></table><div class="empty" id="empty" hidden>没有符合当前筛选条件的要求。</div></div>
@@ -206,7 +206,7 @@ function render(){
   $('review-notices').replaceChildren(...review.map(w=>{const box=node('div',null,'notice');box.append(node('strong','原图复核提示 · 独立 GPT 抽查'),node('p',w.replace(/^【原图复核】GPT 对照原件的抽查提示，非 DeepSeek 自动结论：/,'')));return box;}));
   const pending=profile?(profile.uncertainties||[]):[];listDetails('uncertainties','uncertainty-title','uncertainty-list',pending,'零件信息与适用条件待确认');
   const applicability=isSpec?[]:pendingApplicability(spec,drawing);listDetails('applicability','applicability-title','applicability-list',applicability,'规范适用性待复核');
-  listDetails('warnings','warning-title','warning-list',warnings.filter(w=>!review.includes(w)),'解析与复核记录');
+  listDetails('warnings','warning-title','warning-list',warnings.filter(w=>!review.includes(w)),'提取说明与疑点');
   $('context-control').hidden=!isSpec||scoped(spec)||!rows.some(background);$('usage-filter').hidden=!isSpec||!scoped(spec);$('category-filter').hidden=isSpec||!scoped(drawing);$('conflict-filter').hidden=isSpec||!scoped(drawing);categoryOptions(isSpec?[]:rows);renderTable();
 }
 function renderTable(){

@@ -16,6 +16,42 @@ test('the browser does not turn explanatory source notes into review flags', asy
   assert.equal(needsReview({ ...clear, informationType: 'unclassified' }), true);
 });
 
+test('drawing extraction notes preserve original text without presenting model self-review as acceptance', async () => {
+  const source = await fs.readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  const section = (from, to) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
+  const node = (tag, cls, text) => ({ tag, className: cls, textContent: text || '', children: [], append(...items) { this.children.push(...items); } });
+  const holder = node('div'), original = '已更正 R015，已确认取样要求，已补齐数据。', gpt = '【原图复核】原模型遗漏了默认取样规则。';
+  const context = vm.createContext({ el: node, holder, result: { warnings: [original, gpt, original] },
+    list: value => Array.isArray(value) ? value : [], str: value => value == null ? '' : String(value),
+    details: title => { const element = node('details', '', title), body = node('div'); element.append(body); return { node: element, body }; } });
+  const call = source.match(/    const warn = warnings\(list\(result.warnings\)[^\n]+/)[0];
+  const dedicated = source.match(/    list\(result.warnings\)\.filter\(note => str\(note\)\.startsWith\("【原图复核】"\)\)[^\n]+/)[0];
+  vm.runInContext(section('  function warnings(', '  function coverage(') + '\n' + dedicated + '\n' + call, context);
+  assert.equal(holder.children.length, 2);
+  const [notice, panel] = holder.children;
+  assert.equal(notice.textContent, gpt);
+  assert.equal(panel.textContent, '提取说明与疑点 · 1 项');
+  const body = panel.children[0];
+  assert.equal(body.children[0].textContent, '原始提取记录（未经确认）');
+  assert.match(body.children[1].textContent, /模型提取说明和程序提示，不代表已经确认正确/);
+  assert.match(body.children[1].textContent, /具体问题以要求行标注为准/);
+  assert.deepEqual(body.children[2].children.map(item => item.textContent), [original]);
+});
+
+test('conditional hints keep structured pending issues without repeating extraction or GPT notes', async () => {
+  const source = await fs.readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  const start = source.indexOf('  function pendingIssues('), end = source.indexOf('  function retryAction(', start);
+  const context = vm.createContext({ list: value => Array.isArray(value) ? value : [], str: String,
+    withPendingDispositions: (_, rows) => rows, dispositionDisplayStatus: row => row.status,
+    dispositionDisplayLabel: () => '待确认' });
+  vm.runInContext(source.slice(start, end) + '\nthis.pending=pendingIssues;', context);
+  const result = { drawing: { uncertainties: ['取样区域不清晰'] }, dispositions: [
+    { ruleId: 'R015', status: 'needs_confirmation', reason: '取样条件尚未匹配' },
+    { ruleId: 'R016', status: 'applicable', reason: '适用' }],
+    warnings: ['已更正数据', '【原图复核】取样判定需重新检查'] };
+  assert.deepEqual(Array.from(context.pending(result)), ['取样区域不清晰', 'R015：待确认；取样条件尚未匹配']);
+});
+
 const source = { file: 'scan.pdf', page: 1, quote: '膜厚 20~40 μm' };
 const clear = () => ({ review_required: false, review_note: '', sources: [{ ...source }] });
 const scanned = () => [{ name: 'scan.pdf', pages: 1, textPages: [''], imagePages: [1], needsVisualReview: [] }];

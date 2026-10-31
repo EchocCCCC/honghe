@@ -57,6 +57,35 @@ test('static export follows explicit batch bindings, includes new business field
   } finally { await f.close(); }
 });
 
+test('static extraction notes separate original unconfirmed records from independent GPT findings', async () => {
+  const f = await fixture();
+  try {
+    const original = '已更正 R015，已确认取样要求，已补齐数据。', independent = '【原图复核】原模型遗漏默认取样规则。';
+    f.batches[bid2].drawings[0].result.warnings = [original, independent];
+    await f.run();
+    const html = await fs.readFile(f.output, 'utf8'), script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+    const data = JSON.parse(html.match(/<script id="report-data" type="application\/json">([\s\S]*?)<\/script>/)[1]);
+    const nodes = new Map();
+    const node = tag => ({ tag, children: [], textContent: '', value: '', checked: false, style: {},
+      append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; }, setAttribute() {} });
+    const get = id => { if (!nodes.has(id)) nodes.set(id, node('div')); return nodes.get(id); };
+    const context = vm.createContext({ document: { createElement: node }, $: get, mode: 'drawing',
+      spec: data.specifications[0], drawing: data.specifications[0].drawings[0],
+      renderNavigation() {}, renderTable() {} });
+    const helpers = script.slice(script.indexOf('const simple='), script.indexOf('function renderNavigation(){'));
+    const renderer = script.slice(script.indexOf('function render(){'), script.indexOf('function renderTable(){'));
+    vm.runInContext(helpers + '\n' + renderer + '\nrender();', context);
+    assert.equal(get('warning-title').textContent, '提取说明与疑点 · 1 项');
+    assert.equal(get('warnings').hidden, false);
+    assert.deepEqual(get('warning-list').children.map(item => item.textContent), [original]);
+    assert.equal(get('review-notices').children.length, 1);
+    assert.equal(get('review-notices').children[0].children[0].textContent, '原图复核提示 · 独立 GPT 抽查');
+    assert.equal(get('review-notices').children[0].children[1].textContent, independent);
+    assert.match(html, /<strong>原始提取记录（未经确认）<\/strong>/);
+    assert.match(html, /模型提取说明和程序提示，不代表已经确认正确；原图核对结论见单独提示，具体问题以要求行标注为准。/);
+  } finally { await f.close(); }
+});
+
 test('static export rejects a batch bound to a different specification without publishing a partial file', async () => {
   const f = await fixture();
   try {

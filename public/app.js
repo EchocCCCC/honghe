@@ -179,9 +179,10 @@
     const values = list(items); if (!values.length) return null;
     const ul = el("ul", "parameter-list"); for (const p of values) { const li = el("li", "", p.name); li.append(el("strong", "", `${str(p.value)}${p.unit ? ` ${p.unit}` : ""}`)); ul.append(li); } return ul;
   }
-  function warnings(items, title = "解析提示与待核对事项") {
+  function warnings(items, title = "提取说明与疑点") {
     const values = [...new Set(list(items).map(item => str(item)).filter(Boolean))]; if (!values.length) return null;
-    const panel = details(`${title} · ${values.length} 项`), ul = el("ul", "warning-list"); values.forEach(item => ul.append(el("li", "", item))); panel.body.append(ul); return panel.node;
+    const panel = details(`${title} · ${values.length} 项`), ul = el("ul", "warning-list"); values.forEach(item => ul.append(el("li", "", item)));
+    panel.body.append(el("strong", "panel-note", "原始提取记录（未经确认）"), el("p", "panel-note", "以下为模型提取说明和程序提示，不代表已经确认正确；原图核对结论见单独提示，具体问题以要求行标注为准。R 编号仅用于本次关联规范的内部定位，跨版本含义可能变化，请以原文条款为准。"), ul); return panel.node;
   }
   function coverage(data, review) {
     if (!data) return null;
@@ -426,7 +427,7 @@
   }
   function pendingIssues(result) {
     const pendingIds = new Set(list(result.review?.pendingRuleIds));
-    const values = [...list(result.drawing?.uncertainties).map(str), ...withPendingDispositions(result, list(result.dispositions)).filter(row => dispositionDisplayStatus(row, pendingIds) === "needs_confirmation").map(row => `${row.ruleId}：${dispositionDisplayLabel(row, pendingIds)}；${row.reason}`), ...list(result.warnings).map(str)]; return [...new Set(values.filter(Boolean))];
+    const values = [...list(result.drawing?.uncertainties).map(str), ...withPendingDispositions(result, list(result.dispositions)).filter(row => dispositionDisplayStatus(row, pendingIds) === "needs_confirmation").map(row => `${row.ruleId}：${dispositionDisplayLabel(row, pendingIds)}；${row.reason}`)]; return [...new Set(values.filter(Boolean))];
   }
   function retryAction(drawing) {
     if (!["failed", "completed"].includes(drawing.status)) return null;
@@ -488,7 +489,7 @@
     if (scoped) holder.append(stats([["工艺要求", items.length], ["检验要求", items.filter(item => processCategory(item) === "检验").length], ["要求冲突", items.filter(item => conflictKind(item) === "conflict").length], ["待复核", items.filter(needsReview).length]]), el("p", "information-note", "图纸要求＋适用的规范检验要求；按铸造、机加、热处理、表面处理、刻字、检验、焊接、其他分类。材料要求归“其他”。"));
     else holder.append(stats([["直接制造约束", typeCounts.manufacturing], ["质量与检验", typeCounts.quality], ["采购与交付", typeCounts.procurement], ["背景说明", typeCounts.context]]), informationNote(items));
     const cov = coverage(result.sourceCoverage, result.review); if (cov) holder.append(cov); holder.append(dispositionPanel(result, ctx));
-    const warn = warnings(result.warnings, "零件提示"); if (warn) holder.append(warn);
+    const warn = warnings(list(result.warnings).filter(note => !str(note).startsWith("【原图复核】"))); if (warn) holder.append(warn);
     const toolbar = el("div", "result-toolbar"), tabs = el("div", "filter-tabs"), search = el("input", "result-search"); tabs.setAttribute("role", "group"); tabs.setAttribute("aria-label", "按要求类型筛选"); search.type = "search"; search.placeholder = "搜索要求、参数、原文…"; search.setAttribute("aria-label", "搜索零件要求"); search.value = state.search;
     const pending = pendingIssues(result), pendingPanel = details(`条件与引用提示 · ${pending.length} 项`), pendingList = el("ul", "warning-list"); pending.forEach(issue => pendingList.append(el("li", "", issue))); pendingPanel.body.append(el("p", "panel-note", scoped ? "保留零件事实、适用条件及引用文件中的具体疑点。" : "这里保留历史资料的条件和引用疑点，不计入制造与检验待确认条数。"), pendingList);
     const counts = { core: items.filter(core).length, manufacturing: typeCounts.manufacturing, quality: typeCounts.quality, review: items.filter(item => core(item) && needsReview(item)).length, procurement: typeCounts.procurement, context: typeCounts.context, unclassified: typeCounts.unclassified, all: items.length };
