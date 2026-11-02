@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
+PROCESS_ORDER = ("铸造", "焊接", "机加", "热处理", "表面处理", "刻字", "检验", "其他")
 ROW_KEYS = ("id", "informationType", "processCategory", "usage", "conflict", "category", "requirement", "scope", "parameters", "sources", "review_required", "review_note", "conditions", "exceptions", "origin", "ruleIds", "strength", "overridePolicy", "externalReferences")
 PROFILE_KEYS = ("partNumber", "name", "revision", "material", "materialForm", "process", "castingClass", "airtightness", "dimensionState", "references", "facts", "uncertainties")
 UUID = re.compile(r"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}\Z")
@@ -131,6 +132,7 @@ def snapshot(base, state, allow_incomplete=False):
                 drawings.append(item)
                 continue
             rows = [customer_row(row) for row in output["requirements"]]
+            rows.sort(key=lambda row: PROCESS_ORDER.index(row.get("processCategory")) if row.get("processCategory") in PROCESS_ORDER else len(PROCESS_ORDER))
             profile = pick(output["drawing"], PROFILE_KEYS)
             if "uncertainties" in profile:
                 profile["uncertainties"] = [note for value in profile["uncertainties"] if (note := customer_note(value))]
@@ -216,7 +218,7 @@ const simple=v=>Array.isArray(v)?v.map(simple).filter(Boolean).join('；'):v&&ty
 const node=(tag,text,cls)=>{const el=document.createElement(tag);if(text!=null)el.textContent=text;if(cls)el.className=cls;return el;};
 const isPending=row=>row.review_required===true;
 const background=row=>row.informationType==='context';
-const processNames=['铸造','机加','热处理','表面处理','刻字','检验','焊接','其他'];
+const processNames=__PROCESS_ORDER__;
 const scoped=value=>value.scopePolicy==='drawing-plus-inspection-v1'||(value.requirements||value.rules||[]).some(r=>processNames.includes(r.processCategory));
 const processStage=row=>processNames.includes(row.processCategory)?row.processCategory:'待分类';
 const conflictKind=row=>['conflict','drawing_override'].includes(row.conflict?.kind)?row.conflict.kind:'';
@@ -298,7 +300,7 @@ def main():
     data = snapshot(args.base_url, json.loads(args.state_file.read_text(encoding="utf-8-sig")), allow_incomplete=args.allow_incomplete)
     # Escape HTML parser delimiters, including user/model-authored text in script JSON.
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c").replace("&", "\\u0026").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
-    page = HTML.replace("__REPORT_DATA__", payload)
+    page = HTML.replace("__PROCESS_ORDER__", json.dumps(PROCESS_ORDER, ensure_ascii=False)).replace("__REPORT_DATA__", payload)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(page, encoding="utf-8")
     print(json.dumps({"output": str(args.output), "bytes": args.output.stat().st_size, "totals": data["totals"]}, ensure_ascii=False))

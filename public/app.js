@@ -18,8 +18,12 @@
   const selectedDrawing = () => list(state.batch?.drawings).find(item => item.id === state.drawingId);
   const currentResult = () => drawingHasResult(selectedDrawing()) ? selectedDrawing().result : undefined;
   const informationNames = { manufacturing: "直接制造约束", quality: "质量与检验", procurement: "采购与交付", context: "背景说明", unclassified: "待分类" };
-  const processNames = ["铸造", "机加", "热处理", "表面处理", "刻字", "检验", "焊接", "其他"];
+  const processNames = ["铸造", "焊接", "机加", "热处理", "表面处理", "刻字", "检验", "其他"];
   const processCategory = item => processNames.includes(item?.processCategory) ? item.processCategory : "待分类";
+  function sortByProcess(rows) {
+    const rank = item => { const index = processNames.indexOf(item?.processCategory); return index < 0 ? processNames.length : index; };
+    return [...rows].sort((left, right) => rank(left) - rank(right));
+  }
   const drawingScope = result => result?.scopePolicy === "drawing-plus-inspection-v1" || list(result?.requirements || result?.rules).some(item => processNames.includes(item.processCategory));
   const conflictKind = item => ["conflict", "drawing_override"].includes(item?.conflict?.kind) ? item.conflict.kind : "";
   const processScope = (item, scope) => ["core", "all"].includes(scope) || scope === "review" && needsReview(item) || scope === "conflict" && conflictKind(item) === "conflict" || scope === "override" && conflictKind(item) === "drawing_override" || scope === `process:${processCategory(item)}`;
@@ -77,7 +81,7 @@
   function customerResult(result) {
     if (!result) return result;
     const { run, summary, review, ...visible } = result;
-    const projected = { ...visible, requirements: list(result.requirements).map(row => ({ ...row, review_note: customerNote(row.review_note) })), warnings: customerWarnings(result) };
+    const projected = { ...visible, requirements: sortByProcess(list(result.requirements).map(row => ({ ...row, review_note: customerNote(row.review_note) }))), warnings: customerWarnings(result) };
     if (result.drawing) projected.drawing = { ...result.drawing, uncertainties: list(result.drawing.uncertainties).map(customerNote).filter(Boolean) };
     if (review) projected.review = { pendingRuleIds: list(review.pendingRuleIds), affectedRequirementIds: list(review.affectedRequirementIds),
       ...(review.status === "partial" ? { status: "partial", ...(review.incompleteStage ? { incompleteStage: review.incompleteStage } : {}) } : {}) };
@@ -110,7 +114,7 @@
   }
   function filteredRequirements(result, scope = state.filter, keyword = state.search) {
     const query = str(keyword).trim().toLocaleLowerCase();
-    return list(result.requirements).filter(item => (drawingScope(result) ? processScope(item, scope) : inScope(item, scope)) && (!query || JSON.stringify(item).toLocaleLowerCase().includes(query)));
+    return sortByProcess(list(result.requirements).filter(item => (drawingScope(result) ? processScope(item, scope) : inScope(item, scope)) && (!query || JSON.stringify(item).toLocaleLowerCase().includes(query))));
   }
   function processTag(item) { return el("span", "process-tag", processCategory(item)); }
   function conflictPanel(item) {
@@ -516,7 +520,7 @@
     if (list(profile.facts).length) { const facts = details(`图纸事实与依据 · ${profile.facts.length} 项`), grid = el("div", "profile-facts"); profile.facts.forEach(fact => { const item = el("div", "profile-fact"); item.append(el("strong", "", fact.name), el("p", "", fact.value), evidence(fact.sources, ctx)); grid.append(item); }); facts.body.append(grid); card.append(facts.node); }
     const typeCounts = informationSummary(items);
     holder.append(card);
-    if (scoped) holder.append(stats([["工艺要求", items.length], ["检验要求", items.filter(item => processCategory(item) === "检验").length], ["要求冲突", items.filter(item => conflictKind(item) === "conflict").length], ["待复核", items.filter(needsReview).length]]), el("p", "information-note", "图纸要求＋适用的规范检验要求；按铸造、机加、热处理、表面处理、刻字、检验、焊接、其他分类。材料要求归“其他”。"));
+    if (scoped) holder.append(stats([["工艺要求", items.length], ["检验要求", items.filter(item => processCategory(item) === "检验").length], ["要求冲突", items.filter(item => conflictKind(item) === "conflict").length], ["待复核", items.filter(needsReview).length]]), el("p", "information-note", `图纸要求＋适用的规范检验要求；按${processNames.join("、")}分类。材料要求归“其他”。`));
     else holder.append(stats([["直接制造约束", typeCounts.manufacturing], ["质量与检验", typeCounts.quality], ["采购与交付", typeCounts.procurement], ["背景说明", typeCounts.context]]), informationNote(items));
     const cov = coverage(result.sourceCoverage, result.review); if (cov) holder.append(cov); holder.append(dispositionPanel(result, ctx));
     const warn = warnings(result.warnings); if (warn) holder.append(warn);
