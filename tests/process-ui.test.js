@@ -79,9 +79,9 @@ test('row-review and partial results remain available with explicit labels, but 
   const requirements = [row('clear', '机加'), row('question', '检验', { review_required: true })];
   const partial = { status: 'completed', attemptId: 'new', result: { requirements, review: { status: 'partial' }, run: { attemptId: 'new' } } };
   assert.equal(context.drawingHasResult(partial), true);
-  assert.equal(context.drawingStatusLabel(partial), '部分提取 · 待复核');
-  assert.equal(context.drawingStatusLabel({ ...partial, result: { ...partial.result, review: { status: 'needs_review' } } }), '已提取 · 待复核');
-  assert.equal(context.drawingStatusLabel({ status: 'completed', result: { requirements: [row('clear', '机加')], review: { status: 'completed' } } }), '已提取清单');
+  assert.equal(context.drawingStatusLabel(partial), '部分提取');
+  assert.equal(context.drawingStatusLabel({ ...partial, result: { ...partial.result, review: { status: 'needs_review' } } }), '已有清单');
+  assert.equal(context.drawingStatusLabel({ status: 'completed', result: { requirements: [row('clear', '机加')], review: { status: 'completed' } } }), '已有清单');
   assert.equal(context.drawingHasResult({ ...partial, status: 'failed' }), false);
   assert.equal(context.drawingHasResult({ ...partial, attemptId: 'other' }), false);
 });

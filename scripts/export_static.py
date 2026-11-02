@@ -29,6 +29,57 @@ def public_error(value):
     return text
 
 
+PROCESS_REVIEW_NOTES = (
+    "未注公差标准的适用解释在复核后仍有变化，保留清单并对受影响要求及关联规范逐项复核。",
+    "探伤要求与图纸依据经复核修订，对应条目及规范关联需要重新确认。",
+    "复核修改了匹配使用的图纸依据，保留已提取内容并标明受影响的条目及规范关联。",
+    "复核撤回了缺乏依据的公差对象解释并补充原图依据，对应条目及规范关联需确认。",
+    "原复核主要调整正文措辞；保留现有清单，原程序整件拦截改为具体条目和关联项待复核。",
+    "原图复核后相关条目与规范关联待确认。",
+    "原图复核修改了图纸内容或依据，相关要求及规范适用性需确认。",
+)
+INDEPENDENT_REVIEW_PREFIX = "【原图复核】"
+INDEPENDENT_REVIEW_ATTRIBUTION = "GPT 对照原件的抽查提示，非 DeepSeek 自动结论："
+
+
+def customer_note(value):
+    """Remove internal attribution and exact process notices, retaining technical issues."""
+    if not isinstance(value, str):
+        return value
+    text = value
+    for notice in PROCESS_REVIEW_NOTES:
+        text = text.replace(notice, "")
+    for prefix in (INDEPENDENT_REVIEW_PREFIX + INDEPENDENT_REVIEW_ATTRIBUTION,
+                   INDEPENDENT_REVIEW_PREFIX, "GPT原图复核："):
+        text = text.replace(prefix, "")
+    return re.sub(r"[；;]\s*[；;]+", "；", text).strip(" ；;")
+
+
+def customer_row(row):
+    result = pick(row, ROW_KEYS)
+    if "review_note" in result:
+        result["review_note"] = customer_note(result["review_note"])
+    return result
+
+
+def customer_warnings(warnings, rows=()):
+    result = []
+    for warning in warnings:
+        if isinstance(warning, str) and warning.startswith("流程复核提示："):
+            continue
+        note = customer_note(warning)
+        if not note:
+            continue
+        # Independent checks already attached to their rows need no duplicate card.
+        # A legacy finding without a row is still retained as a neutral technical note.
+        if isinstance(warning, str) and warning.startswith(INDEPENDENT_REVIEW_PREFIX) and any(
+                isinstance(row.get("review_note"), str) and note in row["review_note"] for row in rows):
+            continue
+        if note not in result:
+            result.append(note)
+    return result
+
+
 def snapshot(base, state, allow_incomplete=False):
     if not isinstance(state.get("specifications"), dict) or not state["specifications"]:
         raise ValueError("State must identify at least one specification")
@@ -71,26 +122,23 @@ def snapshot(base, state, allow_incomplete=False):
             item = {
                     "id": drawing["id"], "batchId": batch_id, "stage": stage, "filename": drawing["name"],
                     "sourceSha256": drawing.get("sourceSha256", ""), "status": drawing["status"], "published": published,
-                    "attemptId": current_attempt, "batchCreatedAt": batch.get("createdAt", ""),
-                    "batchUpdatedAt": batch.get("updatedAt", ""),
                 }
             if not published:
                 # Ignore any retained result on failed/pending jobs, and never read audited candidates.
                 reason = drawing.get("error") or ("当前结果与本轮尝试不一致，未展示旧清单。" if not attempt_matches else drawing.get("message"))
-                item.update({"error": public_error(reason), "scopePolicy": result.get("scopePolicy", ""),
-                             "drawing": {}, "summary": "", "requirements": [], "warnings": [], "dispositions": [],
-                             "model": "", "pipelineVersion": ""})
+                item.update({"error": customer_note(public_error(reason)), "scopePolicy": result.get("scopePolicy", ""),
+                             "drawing": {}, "requirements": [], "warnings": [], "dispositions": []})
                 drawings.append(item)
                 continue
+            rows = [customer_row(row) for row in output["requirements"]]
+            profile = pick(output["drawing"], PROFILE_KEYS)
+            if "uncertainties" in profile:
+                profile["uncertainties"] = [note for value in profile["uncertainties"] if (note := customer_note(value))]
             item.update({"scopePolicy": output.get("scopePolicy", ""),
-                    "drawing": pick(output["drawing"], PROFILE_KEYS), "summary": output.get("summary", ""),
-                    "requirements": [pick(row, ROW_KEYS) for row in output["requirements"]],
-                    "warnings": output.get("warnings", []),
-                    "review": {**pick(output.get("review", {}), ("status", "pendingRuleIds", "affectedRequirementIds")), "note": public_error(output.get("review", {}).get("note", ""))},
-                    "dispositions": [pick(row, ("ruleId", "status", "reason", "evidence", "usage")) for row in output.get("dispositions", [])],
-                    "model": output.get("run", {}).get("model", "deepseek-flash"),
-                    "pipelineVersion": output.get("run", {}).get("pipelineVersion", ""),
-                    "processingMode": output.get("run", {}).get("processingMode", ""),
+                    "drawing": profile, "requirements": rows,
+                    "warnings": customer_warnings(output.get("warnings", []), rows),
+                    "review": pick(output.get("review", {}), ("status", "pendingRuleIds", "affectedRequirementIds", "incompleteStage")),
+                    "dispositions": [{**pick(row, ("ruleId", "status", "evidence", "usage")), "reason": customer_note(row.get("reason", ""))} for row in output.get("dispositions", [])],
                 })
             drawings.append(item)
         if not drawings:
@@ -98,15 +146,15 @@ def snapshot(base, state, allow_incomplete=False):
         specifications.append({
             "id": spec_id, "series": series, "metadata": result["metadata"],
             "sourceSha256": spec.get("sourceSha256", ""), "scopePolicy": result.get("scopePolicy", ""),
-            "rules": [pick(row, ROW_KEYS) for row in result["rules"]],
-            "warnings": result.get("warnings", []), "drawings": drawings,
+            "rules": [customer_row(row) for row in result["rules"]],
+            "warnings": customer_warnings(result.get("warnings", [])), "drawings": drawings,
         })
     totals = {"specifications": len(specifications),
               "drawings": sum(len(spec["drawings"]) for spec in specifications),
               "requirements": sum(len(d["requirements"]) for s in specifications for d in s["drawings"])}
     return {"title": "轨道交通零件工艺要求", "formatVersion": 2,
             "exportedAt": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
-            "note": "现有机器结果的静态快照。保留待确认项和独立原图复核提示，未经全部人工确认。原 PDF 未内嵌；来源可查看文件名、物理页码和引文。",
+            "note": "工艺要求及其来源、适用条件和待确认事项。原 PDF 未内嵌；来源可查看文件名、物理页码和引文。",
             "totals": totals, "specifications": specifications}
 
 
@@ -144,11 +192,10 @@ th:first-child{width:26%}th:last-child{width:14%}.stage-cell{font-weight:500;col
         <div class="result-head"><div><h3 id="result-title"></h3><p class="file-name" id="result-file"></p></div><span class="badge" id="result-count"></span></div>
         <div id="result-status" role="status"></div>
         <div id="profile" class="profile"></div>
-        <p class="note">现有机器提取结果；请结合待确认条件与原图复核提示使用。此文件可离线查看，不执行新的文件解析。</p>
-        <div id="review-notices"></div>
+        <p class="note">可按阶段筛选工艺要求，并查看来源、适用条件和条目疑点。</p>
         <details class="aux" id="uncertainties" hidden><summary id="uncertainty-title"></summary><ul id="uncertainty-list"></ul></details>
         <details class="aux" id="applicability" hidden><summary id="applicability-title"></summary><ul id="applicability-list"></ul></details>
-        <details class="aux" id="warnings" hidden><summary id="warning-title"></summary><p class="note"><strong>原始提取记录（未经确认）</strong></p><p class="note">以下为模型提取说明和程序提示，不代表已经确认正确；原图核对结论见单独提示，具体问题以要求行标注为准。R 编号仅用于本次关联规范的内部定位，跨版本含义可能变化，请以原文条款为准。</p><ul id="warning-list"></ul></details>
+        <details class="aux" id="warnings" hidden><summary id="warning-title"></summary><p class="note">具体疑点见对应条目。R 编号仅用于本次关联规范的内部定位，请以原文条款为准。</p><ul id="warning-list"></ul></details>
         <div class="toolbar"><label class="search"><span class="sr-only">搜索要求名称、指标或来源</span><input type="search" id="search" placeholder="搜索要求名称、指标或来源…" autocomplete="off"></label><select class="category-select" id="category-filter" aria-label="按工艺类别筛选"></select><select class="category-select" id="conflict-filter" aria-label="按冲突或覆盖筛选"><option value="">全部状态</option><option value="conflict">要求冲突</option><option value="drawing_override">图纸覆盖</option></select><select class="category-select" id="usage-filter" aria-label="按要求类型筛选" hidden><option value="inspection">检验要求</option><option value="comparison">工艺要求</option><option value="all">全部规范要求</option></select><label class="check"><input type="checkbox" id="pending-only">仅看待复核项</label><label class="check" id="context-control" hidden><input type="checkbox" id="include-context">包含背景说明</label><div class="export-group"><button type="button" id="export-csv">导出当前三列 CSV</button><button type="button" id="export-json">导出当前 JSON</button><button type="button" id="print">打印当前结果</button></div></div>
         <div class="table-caption"><span id="table-count" aria-live="polite"></span><span>展开指标下方可查看来源和适用条件</span></div>
         <div class="table-wrap"><table aria-label="工艺要求"><thead><tr><th scope="col">工艺要求的名称</th><th scope="col">量化指标</th><th scope="col">阶段</th></tr></thead><tbody id="requirements"></tbody></table><div class="empty" id="empty" hidden>没有符合当前筛选条件的要求。</div></div>
@@ -174,11 +221,11 @@ const scoped=value=>value.scopePolicy==='drawing-plus-inspection-v1'||(value.req
 const processStage=row=>processNames.includes(row.processCategory)?row.processCategory:'待分类';
 const conflictKind=row=>['conflict','drawing_override'].includes(row.conflict?.kind)?row.conflict.kind:'';
 const published=d=>d.published!==false&&(!d.status||['completed','partial'].includes(d.status))&&d.requirements.length>0;
-const resultNeedsReview=d=>published(d)&&(['needs_review','partial'].includes(d.review?.status)||d.requirements.some(r=>r.review_required===true));
-const statusLabel=d=>published(d)?(d.review?.status==='partial'?'部分提取 · 待复核':resultNeedsReview(d)?'已提取 · 待复核':'已提取清单'):({failed:'处理失败',queued:'等待处理',preparing:'准备图纸',reading:'识读图纸',matching:'匹配检验要求',auditing:'原图复核',completed:'结果不完整'}[d.status]||'尚未完成');
-function pendingApplicability(specification,drawing){const decisions=drawing.dispositions||[];const pendingIds=new Set(drawing.review?.pendingRuleIds||[]);const ids=new Set([...decisions.filter(d=>d.status==='needs_confirmation').map(d=>d.ruleId),...pendingIds]);const names={applicable:'适用',not_applicable:'不适用',overridden:'图纸覆盖',needs_confirmation:'待确认'};return [...ids].map(id=>{const decision=decisions.find(d=>d.ruleId===id);const rule=specification.rules.find(r=>r.id===id);const label=pendingIds.has(id)?decision?'待复核（原模型：'+(names[decision.status]||decision.status)+'）':'待复核（尚未匹配）':'待确认';return id+(rule?' '+rule.category:'')+'：'+label+'；'+(decision?.reason||'尚未得到可核对的规范匹配处置。');});}
-function snapshotStatusText(drawings){const complete=drawings.filter(published).length;const review=drawings.filter(resultNeedsReview).length;const failed=drawings.filter(d=>d.status==='failed'&&!published(d)).length;return '本轮 '+drawings.length+' 张图纸 · '+complete+' 张已有清单（'+review+' 张待复核） · '+failed+' 张失败 · '+(drawings.length-complete-failed)+' 张待完成';}
-function statusCard(d){const box=node('div',null,published(d)&&!resultNeedsReview(d)?'note':'notice');if(!published(d))box.style.cssText=d.status==='failed'?'border-color:#d59b94;background:#fff3ef;color:#8b3028':'';box.append(node('strong',statusLabel(d)+(published(d)?'':' · 本次无有效清单')));if(!published(d))box.append(node('p',d.error||'本轮处理尚未完成，尚无可展示的工艺要求。'));else if(resultNeedsReview(d))box.append(node('p',d.review?.note||'已保留本轮可提取的清单；待复核条目及关联规范需逐项核对，提取完成不表示验收通过。'));if(published(d)&&d.processingMode==='reprocess_existing')box.append(node('p','已重新整理上轮提取结果，保留原始模型输出及本轮复核标记。'));const times=[];if(d.batchCreatedAt)times.push('批次建立 '+d.batchCreatedAt);if(d.batchUpdatedAt)times.push('本轮更新 '+d.batchUpdatedAt);if(d.attemptId)times.push('尝试 '+d.attemptId.slice(0,8));if(times.length)box.append(node('p',times.join(' · ')));return box;}
+const partial=d=>published(d)&&(d.status==='partial'||d.review?.status==='partial');
+const statusLabel=d=>published(d)?(partial(d)?'部分提取':'已有清单'):({failed:'处理失败',queued:'等待处理',preparing:'准备图纸',reading:'识读图纸',matching:'匹配检验要求',auditing:'核对图纸',completed:'结果不完整'}[d.status]||'尚未完成');
+function pendingApplicability(specification,drawing){const decisions=drawing.dispositions||[];const pendingIds=new Set(drawing.review?.pendingRuleIds||[]);const ids=new Set([...decisions.filter(d=>d.status==='needs_confirmation').map(d=>d.ruleId),...pendingIds]);const names={applicable:'适用',not_applicable:'不适用',overridden:'图纸覆盖',needs_confirmation:'待确认'};return [...ids].map(id=>{const decision=decisions.find(d=>d.ruleId===id);const rule=specification.rules.find(r=>r.id===id);const label=pendingIds.has(id)?decision?'待复核（原判定：'+(names[decision.status]||decision.status)+'）':'待复核（尚未匹配）':'待确认';return id+(rule?' '+rule.category:'')+'：'+label+'；'+(decision?.reason||'尚未得到可核对的规范适用性结论。');});}
+function snapshotStatusText(drawings){const complete=drawings.filter(published).length;const failed=drawings.filter(d=>d.status==='failed'&&!published(d)).length;const pending=drawings.length-complete-failed;return ['共 '+drawings.length+' 张图纸',complete+' 张已有清单',...(failed?[failed+' 张失败']:[]),...(pending?[pending+' 张待完成']:[])].join(' · ');}
+function statusCard(d){if(published(d)&&!partial(d))return null;const box=node('div',null,'notice');if(!published(d))box.style.cssText=d.status==='failed'?'border-color:#d59b94;background:#fff3ef;color:#8b3028':'';box.append(node('strong',statusLabel(d)+(published(d)?'':' · 本次无有效清单')));if(!published(d))box.append(node('p',d.error||'处理尚未完成，尚无可展示的工艺要求。'));else{box.append(node('p','部分步骤尚未完成，当前仅展示已有要求；未完成部分仍需补充。'));if(d.review?.incompleteStage)box.append(node('p','尚未完成：'+d.review.incompleteStage));}return box;}
 function categoryOptions(rows){$('category-filter').replaceChildren(...['',...processNames].map(value=>{const option=node('option',value?value+' · '+rows.filter(r=>r.processCategory===value).length:'全部工艺 · '+rows.length);option.value=value;return option;}));}
 function flash(text){clearTimeout(toastTimer);$('toast').textContent=text;$('toast').hidden=false;toastTimer=setTimeout(()=>$('toast').hidden=true,2800);}
 function download(name,text,type){const blob=new Blob([text],{type});const url=URL.createObjectURL(blob);const a=node('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);flash('已生成下载文件');}
@@ -199,14 +246,13 @@ function render(){
   $('result-title').textContent=isSpec?'规范提取结果':profile.name||drawing.filename.replace(/\.pdf$/i,'');
   $('result-file').textContent=isSpec?spec.metadata.number+' · '+(scoped(spec)?spec.rules.filter(r=>r.usage==='inspection').length+' 条检验要求，'+spec.rules.filter(r=>r.usage==='comparison').length+' 条工艺要求':spec.rules.length+' 条历史规范记录'):drawing.filename;
   $('result-count').textContent=!isSpec&&!published(drawing)?statusLabel(drawing):rows.length+(isSpec?' 条规范依据':' 项工艺要求');
-  $('result-status').replaceChildren(...(isSpec?[]:[statusCard(drawing)]));
+  const card=isSpec?null:statusCard(drawing);$('result-status').replaceChildren(...(card?[card]:[]));
   const tags=[];if(profile){if(profile.partNumber)tags.push('图号（提取值） '+profile.partNumber);if(profile.material)tags.push('材料 '+simple(profile.material));if(profile.revision)tags.push('版次 '+profile.revision);}
   $('profile').replaceChildren(...tags.map(t=>node('span',t)));$('profile').hidden=!tags.length;
-  const warnings=isSpec?spec.warnings:drawing.warnings;const review=warnings.filter(w=>typeof w==='string'&&w.startsWith('【原图复核】'));
-  $('review-notices').replaceChildren(...review.map(w=>{const box=node('div',null,'notice');box.append(node('strong','原图复核提示 · 独立 GPT 抽查'),node('p',w.replace(/^【原图复核】GPT 对照原件的抽查提示，非 DeepSeek 自动结论：/,'')));return box;}));
+  const warnings=isSpec?spec.warnings:drawing.warnings;
   const pending=profile?(profile.uncertainties||[]):[];listDetails('uncertainties','uncertainty-title','uncertainty-list',pending,'零件信息与适用条件待确认');
   const applicability=isSpec?[]:pendingApplicability(spec,drawing);listDetails('applicability','applicability-title','applicability-list',applicability,'规范适用性待复核');
-  listDetails('warnings','warning-title','warning-list',warnings.filter(w=>!review.includes(w)),'提取说明与疑点');
+  listDetails('warnings','warning-title','warning-list',warnings,'提取说明与疑点');
   $('context-control').hidden=!isSpec||scoped(spec)||!rows.some(background);$('usage-filter').hidden=!isSpec||!scoped(spec);$('category-filter').hidden=isSpec||!scoped(drawing);$('conflict-filter').hidden=isSpec||!scoped(drawing);categoryOptions(isSpec?[]:rows);renderTable();
 }
 function renderTable(){

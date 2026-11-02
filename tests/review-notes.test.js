@@ -16,26 +16,40 @@ test('the browser does not turn explanatory source notes into review flags', asy
   assert.equal(needsReview({ ...clear, informationType: 'unclassified' }), true);
 });
 
-test('drawing extraction notes preserve original text without presenting model self-review as acceptance', async () => {
+test('customer results hide iteration metadata while preserving technical issues and review flags', async () => {
   const source = await fs.readFile(new URL('../public/app.js', import.meta.url), 'utf8');
   const section = (from, to) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
   const node = (tag, cls, text) => ({ tag, className: cls, textContent: text || '', children: [], append(...items) { this.children.push(...items); } });
-  const holder = node('div'), original = '已更正 R015，已确认取样要求，已补齐数据。', gpt = '【原图复核】原模型遗漏了默认取样规则。';
-  const context = vm.createContext({ el: node, holder, result: { warnings: [original, gpt, original] },
+  const flow = '复核修改了匹配使用的图纸依据，保留已提取内容并标明受影响的条目及规范关联。';
+  const technical = 'Ra3.2引线指水平槽底，受控面需核对。', unlinked = 'φ72受控对象尚需核对。';
+  const raw = { drawing: { name: '零件', uncertainties: ['原料厚度未提供'] }, requirements: [
+    { id: 'D1', requirement: 'Ra3.2', review_required: true, review_note: flow + '；GPT原图复核：' + technical, sources: [{ file: 'part.pdf', page: 1, quote: 'Ra3.2' }] },
+    { id: 'D2', requirement: '图中尺寸为阳极氧化后的尺寸', review_required: true, review_note: flow }],
+    warnings: ['流程复核提示：' + flow, '【原图复核】' + technical, '【原图复核】GPT 对照原件的抽查提示，非 DeepSeek 自动结论：' + unlinked],
+    run: { processingMode: 'reprocess_existing', model: 'deepseek-flash' }, summary: '已重新整理上轮提取结果',
+    review: { status: 'needs_review', note: flow, pendingRuleIds: ['R1'], affectedRequirementIds: ['D1', 'D2'] } };
+  const before = JSON.stringify(raw);
+  const context = vm.createContext({ el: node,
     list: value => Array.isArray(value) ? value : [], str: value => value == null ? '' : String(value),
     details: title => { const element = node('details', '', title), body = node('div'); element.append(body); return { node: element, body }; } });
-  const call = source.match(/    const warn = warnings\(list\(result.warnings\)[^\n]+/)[0];
-  const dedicated = source.match(/    list\(result.warnings\)\.filter\(note => str\(note\)\.startsWith\("【原图复核】"\)\)[^\n]+/)[0];
-  vm.runInContext(section('  function warnings(', '  function coverage(') + '\n' + dedicated + '\n' + call, context);
-  assert.equal(holder.children.length, 2);
-  const [notice, panel] = holder.children;
-  assert.equal(notice.textContent, gpt);
+  vm.runInContext(section('  const informationNames = ', '  const uniqueText = ') + '\n' + section('  function warnings(', '  function coverage(') + '\nthis.project=customerResult;this.showNotes=warnings;', context);
+  const result = context.project(raw), plain = value => JSON.parse(JSON.stringify(value));
+  assert.equal(JSON.stringify(raw), before);
+  assert.equal(result.requirements[0].review_note, technical);
+  assert.equal(result.requirements[1].review_note, '');
+  assert.deepEqual(plain(result.requirements.map(row => row.review_required)), [true, true]);
+  assert.equal(result.requirements[0].requirement, raw.requirements[0].requirement);
+  assert.deepEqual(plain(result.requirements[0].sources), raw.requirements[0].sources);
+  assert.deepEqual(plain(result.review.pendingRuleIds), ['R1']);
+  assert.deepEqual(plain(result.warnings), [unlinked]);
+  assert.ok(!JSON.stringify(result).includes('GPT'));
+  assert.ok(!JSON.stringify(result).includes('reprocess_existing'));
+  assert.ok(!JSON.stringify(result).includes(flow));
+  const panel = context.showNotes(result.warnings);
   assert.equal(panel.textContent, '提取说明与疑点 · 1 项');
   const body = panel.children[0];
-  assert.equal(body.children[0].textContent, '原始提取记录（未经确认）');
-  assert.match(body.children[1].textContent, /模型提取说明和程序提示，不代表已经确认正确/);
-  assert.match(body.children[1].textContent, /具体问题以要求行标注为准/);
-  assert.deepEqual(body.children[2].children.map(item => item.textContent), [original]);
+  assert.match(body.children[0].textContent, /对应条目和原文依据/);
+  assert.deepEqual(body.children[1].children.map(item => item.textContent), [unlinked]);
 });
 
 test('conditional hints keep structured pending issues without repeating extraction or GPT notes', async () => {
@@ -50,6 +64,56 @@ test('conditional hints keep structured pending issues without repeating extract
     { ruleId: 'R016', status: 'applicable', reason: '适用' }],
     warnings: ['已更正数据', '【原图复核】取样判定需重新检查'] };
   assert.deepEqual(Array.from(context.pending(result)), ['取样区域不清晰', 'R015：待确认；取样条件尚未匹配']);
+});
+
+test('customer drawing view removes whole-result review and GPT cards but retains row issues and incomplete status', async () => {
+  const source = await fs.readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+  const section = (from, to) => source.slice(source.indexOf(from), source.indexOf(to, source.indexOf(from)));
+  const node = (tag, cls, text) => ({ tag, className: cls || '', textContent: text || '', children: [], dataset: {},
+    classList: { add() {}, toggle() {} }, setAttribute() {}, addEventListener() {}, querySelectorAll() { return []; },
+    append(...items) { this.children.push(...items); }, replaceChildren(...items) { this.children = items; } });
+  const walk = element => [element, ...element.children.flatMap(walk)];
+  const technical = 'Ra3.2指向槽底，需核对对应面。';
+  const result = { scopePolicy: 'drawing-plus-inspection-v1', drawing: { name: '零件', uncertainties: [] },
+    summary: '已重新整理上轮提取结果', run: { processingMode: 'reprocess_existing' },
+    requirements: [{ id: 'D1', category: '槽底粗糙度', requirement: 'Ra3.2', processCategory: '机加', informationType: 'quality', origin: 'drawing', ruleIds: [], sources: [], review_required: true, review_note: 'GPT原图复核：' + technical }],
+    warnings: ['【原图复核】GPT 对照原件的抽查提示，非 DeepSeek 自动结论：' + technical], dispositions: [],
+    review: { status: 'needs_review', pendingRuleIds: [], affectedRequirementIds: ['D1'], note: '内部复核状态说明' } };
+  for (const status of ['completed', 'partial', 'failed']) {
+    const holder = node('div'), exports = node('button'), raw = structuredClone(result);
+    if (status === 'partial') Object.assign(raw.review, { status: 'partial', incompleteStage: '规范匹配' });
+    const before = JSON.stringify(raw);
+    const context = vm.createContext({ state: { filter: 'core', search: '', batch: { stage: 'all' } },
+      $: id => id === 'drawing-result' ? holder : exports, list: value => Array.isArray(value) ? value : [],
+      str: value => value == null ? '' : String(value), enc: encodeURIComponent, el: node, statusNames: { failed: '处理失败' },
+      stageNames: { all: '全部阶段' }, dispositionNames: { applicable: '适用', not_applicable: '不适用', needs_confirmation: '待确认' },
+      originNames: { drawing: '图纸要求' }, uniqueText: values => [...new Set(values.filter(Boolean))],
+      context: () => ({}), sourceLink: text => node('a', '', text), parameters: () => null, evidence: () => node('details', 'evidence'),
+      coverage: () => null, dispositionPanel: () => node('details', 'dispositions'), retryAction: () => null,
+      statusBox: drawing => node('div', 'status-box', drawing.status), stats: () => node('div', 'stats'),
+      details: title => { const element = node('details', '', title), body = node('div'); element.append(body); return { node: element, body }; } });
+    vm.runInContext(section('  const informationNames = ', '  const uniqueText = ') + '\n' +
+      section('  function warnings(', '  function coverage(') + '\n' +
+      section('  function renderRequirement(', '  function dispositionPanel(') + '\n' +
+      section('  function pendingIssues(', '  function retryAction(') + '\n' +
+      section('  function renderDrawing(', '  function renderBatch(') + '\nthis.show=renderDrawing;', context);
+    context.show({ id: 'part', name: 'part.pdf', status, result: raw });
+    const elements = walk(holder), text = elements.map(el => el.textContent).join(' ');
+    assert.equal(JSON.stringify(raw), before);
+    assert.ok(!text.includes('GPT'));
+    assert.ok(!text.includes('已重新整理'));
+    assert.ok(!text.includes('已提取 · 待复核'));
+    assert.ok(!elements.some(el => el.className.includes('result-review-notice')));
+    if (status === 'failed') {
+      assert.ok(elements.some(el => el.className === 'status-box'));
+      assert.match(text, /没有可展示的有效清单/);
+    } else {
+      assert.ok(text.includes(technical));
+      assert.ok(text.includes('待复核'));
+      assert.equal(elements.some(el => el.className.includes('partial-extraction-note')), status === 'partial');
+      if (status === 'partial') assert.match(text, /规范匹配尚未完成/);
+    }
+  }
 });
 
 const source = { file: 'scan.pdf', page: 1, quote: '膜厚 20~40 μm' };

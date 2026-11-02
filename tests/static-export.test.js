@@ -46,7 +46,7 @@ test('static export follows explicit batch bindings, includes new business field
     assert.deepEqual(spec.drawings.map(d => d.id), ['new', 'second']);
     assert.equal(spec.drawings[0].requirements[0].processCategory, '焊接');
     assert.equal(spec.drawings[0].requirements[0].conflict.specificationRequirement, '可修复');
-    assert.equal(spec.drawings[0].warnings[0], '【原图复核】保留此提示');
+    assert.equal(spec.drawings[0].warnings[0], '保留此提示');
     for (const secret of ['PRIVATE_DISK_PATH', 'PRIVATE_PROMPT', 'PRIVATE_API_KEY']) assert.ok(!html.includes(secret), secret);
     assert.ok(!html.includes('</script><img'));
     assert.equal(spec.drawings[0].requirements[0].requirement, requirement('new').requirement);
@@ -57,11 +57,19 @@ test('static export follows explicit batch bindings, includes new business field
   } finally { await f.close(); }
 });
 
-test('static extraction notes separate original unconfirmed records from independent GPT findings', async () => {
+test('customer export removes internal review cards and attribution while retaining row issues', async () => {
   const f = await fixture();
   try {
-    const original = '已更正 R015，已确认取样要求，已补齐数据。', independent = '【原图复核】原模型遗漏默认取样规则。';
-    f.batches[bid2].drawings[0].result.warnings = [original, independent];
+    const original = '取样区域需明确。', technical = '原图7上偏差+0.1、下偏差0，结果允许范围方向相反。';
+    const flow = '复核修改了匹配使用的图纸依据，保留已提取内容并标明受影响的条目及规范关联。';
+    const result = f.batches[bid2].drawings[0].result;
+    result.warnings = [original, '【原图复核】GPT 对照原件的抽查提示，非 DeepSeek 自动结论：' + technical, '流程复核提示：' + flow];
+    result.requirements[0].review_note = flow + '；GPT原图复核：' + technical;
+    result.requirements.push(requirement('flow-only', { review_note: flow }));
+    result.review = { status: 'needs_review', note: '已重新整理上轮提取结果。', pendingRuleIds: ['R1'] };
+    result.summary = 'GPT抽查及上轮提取记录';
+    result.run.processingMode = 'reprocess_existing';
+    const before = structuredClone(f.batches);
     await f.run();
     const html = await fs.readFile(f.output, 'utf8'), script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
     const data = JSON.parse(html.match(/<script id="report-data" type="application\/json">([\s\S]*?)<\/script>/)[1]);
@@ -75,14 +83,20 @@ test('static extraction notes separate original unconfirmed records from indepen
     const helpers = script.slice(script.indexOf('const simple='), script.indexOf('function renderNavigation(){'));
     const renderer = script.slice(script.indexOf('function render(){'), script.indexOf('function renderTable(){'));
     vm.runInContext(helpers + '\n' + renderer + '\nrender();', context);
+    const current = data.specifications[0].drawings[0];
+    assert.equal(current.requirements[0].review_note, technical);
+    assert.equal(current.requirements[0].review_required, true);
+    assert.equal(current.requirements[0].conflict.kind, 'conflict');
+    assert.equal(current.requirements[1].review_note, '');
+    assert.equal(current.requirements[1].review_required, true);
+    assert.deepEqual(current.review.pendingRuleIds, ['R1']);
     assert.equal(get('warning-title').textContent, '提取说明与疑点 · 1 项');
     assert.equal(get('warnings').hidden, false);
     assert.deepEqual(get('warning-list').children.map(item => item.textContent), [original]);
-    assert.equal(get('review-notices').children.length, 1);
-    assert.equal(get('review-notices').children[0].children[0].textContent, '原图复核提示 · 独立 GPT 抽查');
-    assert.equal(get('review-notices').children[0].children[1].textContent, independent);
-    assert.match(html, /<strong>原始提取记录（未经确认）<\/strong>/);
-    assert.match(html, /模型提取说明和程序提示，不代表已经确认正确；原图核对结论见单独提示，具体问题以要求行标注为准。/);
+    assert.equal(get('result-status').children.length, 0);
+    for (const internal of ['GPT', '已提取 · 待复核', '已重新整理上轮', 'reprocess_existing', flow, 'review-notices']) assert.ok(!html.includes(internal), internal);
+    assert.ok(html.includes(technical));
+    assert.deepEqual(f.batches, before);
   } finally { await f.close(); }
 });
 
@@ -151,44 +165,46 @@ test('explicit status export retains latest failed and pending cards, never stal
     assert.deepEqual(data.totals, { specifications: 1, drawings: 2, requirements: 0 });
     const drawings = data.specifications[0].drawings;
     assert.deepEqual(drawings.map(d => [d.id, d.status, d.published, d.requirements.length]), [['new', 'failed', false, 0], ['second', 'reading', false, 0]]);
-    assert.equal(drawings[0].attemptId, 'latest-failed');
-    assert.equal(drawings[0].batchCreatedAt, batch.createdAt); assert.equal(drawings[0].batchUpdatedAt, batch.updatedAt);
+    assert.equal(drawings[0].attemptId, undefined);
+    assert.equal(drawings[0].batchCreatedAt, undefined); assert.equal(drawings[0].batchUpdatedAt, undefined);
     assert.match(drawings[0].error, /原图复核未通过/);
     for (const secret of ['C:/private', 'sk-abcdefghijklmnopqrstuv', 'PRIVATE_DISK_PATH', 'PRIVATE_PROMPT', 'PRIVATE_API_KEY']) assert.ok(!html.includes(secret), secret);
-    assert.deepEqual(drawings[0].drawing, {}); assert.deepEqual(drawings[0].warnings, []); assert.equal(drawings[0].pipelineVersion, '');
+    assert.deepEqual(drawings[0].drawing, {}); assert.deepEqual(drawings[0].warnings, []); assert.equal(drawings[0].pipelineVersion, undefined);
     const script = html.match(/<script>([\s\S]*?)<\/script>/)[1]; assert.doesNotThrow(() => new vm.Script(script));
     const start = script.indexOf('const published='), end = script.indexOf('function categoryOptions');
     const context = vm.createContext({}); vm.runInContext(script.slice(start, end) + '\nthis.isPublished=published;this.label=statusLabel;', context);
     assert.equal(context.isPublished(drawings[0]), false); assert.equal(context.label(drawings[0]), '处理失败');
     assert.equal(context.label(drawings[1]), '识读图纸');
-    assert.match(context.snapshotStatusText(drawings), /本轮 2 张图纸 · 0 张已有清单（0 张待复核） · 1 张失败 · 1 张待完成/);
-    assert.match(html, /本次无有效清单/); assert.match(html, /批次建立/); assert.match(html, /本轮更新/);
+    assert.match(context.snapshotStatusText(drawings), /共 2 张图纸 · 0 张已有清单 · 1 张失败 · 1 张待完成/);
+    assert.match(html, /本次无有效清单/); assert.ok(!html.includes('批次建立')); assert.ok(!html.includes('本轮更新'));
   } finally { await f.close(); }
 });
 
-test('row-review and partial API results are exported as visible current lists with minimal review provenance', async () => {
+test('customer export preserves incomplete and applicability states without debug metadata', async () => {
   const f = await fixture();
   try {
     const first = f.batches[bid2].drawings[0], second = f.batches[bid2].drawings[1];
     first.result.review = { status: 'needs_review', note: '匹配前提变化，关联规范待复核。', pendingRuleIds: ['R1'], affectedRequirementIds: ['new'], rawPath: 'PRIVATE_REVIEW_PATH' };
     first.result.run.processingMode = 'reprocess_existing';
     first.result.dispositions = [{ ruleId: 'R1', status: 'not_applicable', reason: '原模型材料条件不适用', evidence: [] }];
-    second.result.review = { status: 'partial', note: '复核未完成，已保留合法提取内容。C:/private/audit.txt\nsk-abcdefghijklmnopqrstuv', pendingRuleIds: ['R2'] };
+    second.result.review = { status: 'partial', note: '复核未完成，已保留合法提取内容。C:/private/audit.txt\nsk-abcdefghijklmnopqrstuv', pendingRuleIds: ['R2'], incompleteStage: '规范匹配' };
     const before = structuredClone(f.batches);
     await f.run();
     const html = await fs.readFile(f.output, 'utf8'), data = JSON.parse(html.match(/<script id="report-data" type="application\/json">([\s\S]*?)<\/script>/)[1]);
     const drawings = data.specifications[0].drawings;
     assert.deepEqual(drawings.map(d => [d.published, d.requirements.length, d.review.status]), [[true, 1, 'needs_review'], [true, 1, 'partial']]);
     assert.deepEqual(drawings[0].review.pendingRuleIds, ['R1']); assert.deepEqual(drawings[0].review.affectedRequirementIds, ['new']);
-    assert.equal(drawings[0].processingMode, 'reprocess_existing');
+    assert.equal(drawings[0].processingMode, undefined);
+    assert.equal(drawings[0].review.note, undefined); assert.equal(drawings[1].review.note, undefined);
+    assert.equal(drawings[1].review.incompleteStage, '规范匹配');
     assert.equal(drawings[0].dispositions[0].status, 'not_applicable');
     for (const secret of ['PRIVATE_REVIEW_PATH', 'C:/private', 'sk-abcdefghijklmnopqrstuv']) assert.ok(!html.includes(secret), secret);
     const script = html.match(/<script>([\s\S]*?)<\/script>/)[1], start = script.indexOf('const published='), end = script.indexOf('function categoryOptions');
     const context = vm.createContext({}); vm.runInContext(script.slice(start, end) + '\nthis.label=statusLabel;this.pending=pendingApplicability;this.counts=snapshotStatusText;', context);
-    assert.equal(context.label(drawings[0]), '已提取 · 待复核'); assert.equal(context.label(drawings[1]), '部分提取 · 待复核');
-    assert.match(context.pending(data.specifications[0], drawings[0])[0], /待复核（原模型：不适用）/);
+    assert.equal(context.label(drawings[0]), '已有清单'); assert.equal(context.label(drawings[1]), '部分提取');
+    assert.match(context.pending(data.specifications[0], drawings[0])[0], /待复核（原判定：不适用）/);
     assert.match(context.pending(data.specifications[0], drawings[1])[0], /待复核（尚未匹配）/);
-    assert.match(context.counts(drawings), /2 张已有清单（2 张待复核） · 0 张失败/);
+    assert.equal(context.counts(drawings), '共 2 张图纸 · 2 张已有清单');
     assert.deepEqual(f.batches, before);
   } finally { await f.close(); }
 });

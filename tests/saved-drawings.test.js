@@ -138,7 +138,7 @@ test('the live-batch overlay cannot promote a broken or unfinished result into a
 });
 
 test('saved summaries retain partial or row-review result labels instead of calling them approved results', () => {
-  for (const [reviewStatus, label] of [['needs_review', '已提取 · 待复核'], ['partial', '部分提取 · 待复核']]) {
+  for (const [reviewStatus, label] of [['needs_review', '已有清单'], ['partial', '部分提取']]) {
     const saved = batch('batch', 'spec', [drawing('part', { reviewStatus, reviewRequiredCount: 2 })]);
     const f = fixture('spec', () => {}, { savedBatches: [saved] });
     f.render();
