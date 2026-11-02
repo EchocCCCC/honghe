@@ -4,6 +4,10 @@
 
 所有大模型调用由真实 Pi CLI `-p --mode json` 执行，固定使用 DeepSeek 4.1 Flash（API ID `deepseek-flash`）。2026-10-28官方文档映射为 `DeepSeek-V4.1-Flash-1017`；供应商别名可能升级，不是不可变版本锁。没有Pro入口、其他大模型回退或运行时GPT调用。Poppler读取PDF文字层与图像；本地RapidOCR专用识读模型提供候选文字和位置，不负责工艺判断，也不能替代原图。
 
+## 原始资料
+
+本项目使用的两份技术规范和对应的八张原始图纸保存在[资料目录](资料/README.md)，按 TMT0103、TMT0104 分组。PDF 保留原文件名和原始内容；[文件清单](资料/文件清单.json)记录各图纸对应的规范、文件大小及 SHA-256。
+
 ## 本地启动
 
 需要Node.js 24 LTS（最低22.19）、pnpm 11.25及Poppler的pdftotext、pdftoppm、pdfinfo，以及Python 3.11+和requirements-pdf.txt中的表格/OCR依赖。Windows可在.env填写三个工具的绝对路径；Linux安装poppler-utils。基础PDF脚本仍兼容Python 3.10，完整OCR流程所锁定的ONNX Runtime需要3.11+。
