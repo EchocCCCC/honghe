@@ -97,6 +97,8 @@ node scripts/classify-existing.js --runtime /absolute/project/runtime
 
 ## 静态报告
 
+已提交的[静态 HTML 报告](reports/工艺要求-静态报告.html)包含当前两套规范和八张图纸的提取结果。下载该 HTML 文件后用浏览器打开，即可离线查看、筛选及导出。
+
 ```powershell
 python scripts/export_static.py --state-file work/run-row-review-20261031/state.json --base-url http://127.0.0.1:3000 --output work/static-report/工艺要求-静态报告.html
 ```
